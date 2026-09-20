@@ -53,7 +53,7 @@ def _access_token(config):
     try:
         response = requests.post(
             f"https://{config['shop']}/admin/oauth/access_token",
-            json={
+            data={
                 "client_id": config["client_id"],
                 "client_secret": config["client_secret"],
                 "grant_type": "client_credentials",
