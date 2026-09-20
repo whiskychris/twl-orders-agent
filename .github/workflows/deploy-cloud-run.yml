@@ -1,0 +1,52 @@
+name: Deploy orders agent to Cloud Run
+
+# Manual only until the infrastructure in docs/setup.md exists (service accounts, the Workload
+# Identity provider for this repo, and the repository variables below). Then change the trigger
+# to push on main.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: twl-orders-agent-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: the-rabbit-hole-509200
+          workload_identity_provider: projects/445776587227/locations/global/workloadIdentityPools/github/providers/twl-orders-agent
+          service_account: twl-orders-deployer@the-rabbit-hole-509200.iam.gserviceaccount.com
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+
+      # The four ANTHROPIC_* values are set as repository variables (Settings > Variables).
+      # --update-env-vars adds to the service's variables and never removes others.
+      - name: Deploy private orders agent
+        run: |
+          gcloud run deploy twl-orders-agent \
+            --project=the-rabbit-hole-509200 \
+            --region=australia-southeast1 \
+            --source=. \
+            --service-account=twl-orders-agent@the-rabbit-hole-509200.iam.gserviceaccount.com \
+            --no-allow-unauthenticated \
+            --update-env-vars=ANTHROPIC_FEDERATION_RULE_ID=${{ vars.ANTHROPIC_FEDERATION_RULE_ID }},ANTHROPIC_ORGANIZATION_ID=${{ vars.ANTHROPIC_ORGANIZATION_ID }},ANTHROPIC_SERVICE_ACCOUNT_ID=${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }},ANTHROPIC_WORKSPACE_ID=${{ vars.ANTHROPIC_WORKSPACE_ID }} \
+            --memory=1Gi \
+            --cpu=1 \
+            --concurrency=1 \
+            --max-instances=3 \
+            --min-instances=0 \
+            --timeout=900 \
+            --quiet
