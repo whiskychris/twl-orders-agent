@@ -39,7 +39,8 @@ jobs:
           gcloud run deploy twl-orders-agent \
             --project=the-rabbit-hole-509200 \
             --region=australia-southeast1 \
-            --source=. \
+                        --source=. \
+            --build-service-account=projects/the-rabbit-hole-509200/serviceAccounts/twl-build@the-rabbit-hole-509200.iam.gserviceaccount.com \
             --service-account=twl-orders-agent@the-rabbit-hole-509200.iam.gserviceaccount.com \
             --no-allow-unauthenticated \
             --update-env-vars=ANTHROPIC_FEDERATION_RULE_ID=${{ vars.ANTHROPIC_FEDERATION_RULE_ID }},ANTHROPIC_ORGANIZATION_ID=${{ vars.ANTHROPIC_ORGANIZATION_ID }},ANTHROPIC_SERVICE_ACCOUNT_ID=${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }},ANTHROPIC_WORKSPACE_ID=${{ vars.ANTHROPIC_WORKSPACE_ID }} \
