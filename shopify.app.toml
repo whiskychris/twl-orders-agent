@@ -1,0 +1,16 @@
+client_id = "31c62f8bbc34dc302650d4a883b0b2e2"
+name = "TWL Orders Agent"
+application_url = "https://shopify.dev/apps/default-app-home"
+embedded = false
+
+[webhooks]
+api_version = "2026-07"
+
+[access_scopes]
+scopes = "read_orders,read_products,read_inventory,read_locations,read_customers,read_assigned_fulfillment_orders,read_merchant_managed_fulfillment_orders,read_third_party_fulfillment_orders"
+
+[auth]
+redirect_urls = [ "https://shopify.dev/apps/default-app-home/api/auth" ]
+
+[build]
+automatically_update_urls_on_dev = false
