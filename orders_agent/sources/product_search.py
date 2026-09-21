@@ -24,6 +24,28 @@ query Sources($collections: String!) {
 }
 """
 
+# Everything the ranking needs to know about a product. Shared by the search and the collection lookup.
+PRODUCT_FIELDS = """
+fragment ProductFields on Product {
+  id
+  title
+  handle
+  status
+  vendor
+  productType
+  tags
+  totalInventory
+  preOrderEta: metafield(namespace: "backendProduct", key: "preOrderEta") { value }
+  inOurBrands: inCollection(id: $ourBrands)
+  inIbCollection: inCollection(id: $ibCollection)
+  inSpecialCollection: inCollection(id: $specialCollection)
+  inTradeCore: publishedOnPublication(publicationId: $tradeCore)
+  inTradeIbs: publishedOnPublication(publicationId: $tradeIbs)
+  inTradeSpecial: publishedOnPublication(publicationId: $tradeSpecial)
+  variants(first: 20) { nodes { id title sku inventoryQuantity } }
+}
+"""
+
 CANDIDATES = """
 query ProductCandidates(
   $query: String!, $first: Int!,
@@ -31,27 +53,35 @@ query ProductCandidates(
   $tradeCore: ID!, $tradeIbs: ID!, $tradeSpecial: ID!
 ) {
   products(first: $first, query: $query, sortKey: RELEVANCE) {
-    nodes {
-      id
-      title
-      handle
-      status
-      vendor
-      productType
-      tags
-      totalInventory
-      preOrderEta: metafield(namespace: "backendProduct", key: "preOrderEta") { value }
-      inOurBrands: inCollection(id: $ourBrands)
-      inIbCollection: inCollection(id: $ibCollection)
-      inSpecialCollection: inCollection(id: $specialCollection)
-      inTradeCore: publishedOnPublication(publicationId: $tradeCore)
-      inTradeIbs: publishedOnPublication(publicationId: $tradeIbs)
-      inTradeSpecial: publishedOnPublication(publicationId: $tradeSpecial)
-      variants(first: 20) { nodes { id title sku inventoryQuantity } }
+    nodes { ...ProductFields }
+  }
+}
+""" + PRODUCT_FIELDS
+
+COLLECTION_PRODUCTS = """
+query CollectionProducts(
+  $id: ID!, $first: Int!,
+  $ourBrands: ID!, $ibCollection: ID!, $specialCollection: ID!,
+  $tradeCore: ID!, $tradeIbs: ID!, $tradeSpecial: ID!
+) {
+  collection(id: $id) {
+    title
+    sortOrder
+    products(first: $first, sortKey: MANUAL) {
+      nodes { ...ProductFields }
     }
   }
 }
+""" + PRODUCT_FIELDS
+
+FIND_COLLECTION = """
+query FindCollection($query: String!) {
+  collections(first: 5, query: $query) { nodes { id title } }
+}
 """
+
+_quick_collection = {}   # title -> (collection id, loaded_at)
+COLLECTION_MAX = 50
 
 
 def _nodes(connection):
@@ -147,17 +177,62 @@ def search(config, shopify_query, limit=50):
     return [_product(node) for node in _nodes(data.get("products"))]
 
 
+def collection_products(config, title):
+    """The products in a manual collection, in the collection's own order (position 1 first). Used for the
+    quick order list, so staff manage it in the Shopify admin. Raises ShopifyError if the collection can't
+    be found, is ambiguous, isn't sorted manually (its order would then mean nothing), or can't be read."""
+    now = time.time()
+    cached = _quick_collection.get(title)
+    if cached and now - cached[1] < SOURCES_TTL:
+        collection_id = cached[0]
+    else:
+        wanted = re.sub(r"['\"]", "", title)
+        data = graphql(FIND_COLLECTION, {"query": f"title:'{wanted}'"})
+        matches = [node["id"] for node in _nodes(data.get("collections")) if node["title"] == title]
+        if len(matches) != 1:
+            raise ShopifyError(f"The collection '{title}' was {'not found' if not matches else 'found more than once'}.")
+        collection_id = matches[0]
+        _quick_collection[title] = (collection_id, now)
+
+    variables = {"id": collection_id, "first": COLLECTION_MAX, **resolve_sources(config)}
+    data = graphql(COLLECTION_PRODUCTS, variables)
+    collection = data.get("collection")
+    if not collection:
+        _quick_collection.pop(title, None)
+        raise ShopifyError(f"The collection '{title}' could not be read.")
+    if collection.get("sortOrder") != "MANUAL":
+        raise ShopifyError(f"The collection '{title}' must be sorted manually, because its order is the priority order.")
+    return [_product(node) for node in _nodes(collection.get("products"))]
+
+
 _SAFE_TOKEN = re.compile(r"[^a-z0-9]")
 
 
-def title_query(tokens, in_stock=True):
+def _title_filter(word):
+    clean = _SAFE_TOKEN.sub("", str(word).lower())
+    return f"title:*{clean}*" if clean else None
+
+
+def title_query(tokens, in_stock=True, groups=None):
     """A Shopify search for products whose title contains every token. Tokens are reduced to letters and
-    digits, so nothing a user types can add a search filter of its own."""
+    digits, so nothing a user types can add a search filter of its own. `groups` maps a token that stands
+    for several alternatives (dd = Decadent Drams, Whiskyland, ...) to those alternatives, each a list of
+    words: the search then accepts any one of them."""
     parts = []
     for token in tokens:
-        clean = _SAFE_TOKEN.sub("", token.lower())
-        if clean:
-            parts.append(f"title:*{clean}*")
+        alternatives = (groups or {}).get(token)
+        if alternatives:
+            options = []
+            for alternative in alternatives:
+                filters = [f for f in (_title_filter(word) for word in alternative) if f]
+                if filters:
+                    options.append("(" + " AND ".join(filters) + ")")
+            if options:
+                parts.append("(" + " OR ".join(options) + ")")
+        else:
+            single = _title_filter(token)
+            if single:
+                parts.append(single)
     if not parts:
         raise ShopifyError("Give me a product name to look for.")
     parts.append("status:active")
@@ -166,11 +241,11 @@ def title_query(tokens, in_stock=True):
     return " AND ".join(parts)
 
 
-def out_of_stock_query(tokens, tags):
+def out_of_stock_query(tokens, tags, groups=None):
     """A Shopify search for products with no stock (zero or oversold) that carry one of these tags. Used
     for the tags whose products may be ordered out of stock (TWL Brand), so they are found even when
     plenty of in-stock products match the same words."""
-    base = title_query(tokens, in_stock=False)
+    base = title_query(tokens, in_stock=False, groups=groups)
     clean = [re.sub(r"['\"]", "", tag) for tag in tags if tag]
     if not clean:
         raise ShopifyError("No tags are set for out-of-stock products.")

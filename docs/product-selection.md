@@ -35,13 +35,18 @@ catalog names are looked up in Shopify by name and cached for an hour. **If a na
 (renamed, deleted), product picking refuses with a clear message** rather than ranking without it.
 
 ## Ahead of the ranges
-1. **The quick order list**: Arran 10, Arran Sherry, GlenAllachie 12, GlenAllachie 10 Cask Strength, Remnant
-   Golden Fleece, Ardnahoe Infinite Loch, Ardnahoe Bholsa (in that order).
+1. **The quick order list**: the Shopify manual collection **"Popular Trade Products"**, in its own order. Today:
+   Arran 10, Arran Sherry, GlenAllachie 12, GlenAllachie 10 Cask Strength, Remnant Golden Fleece, Ardnahoe Infinite
+   Loch, Ardnahoe Bholsa. Staff change it in the Shopify admin (add, remove, drag to reorder) and the agent reads
+   it live, so there is nothing to deploy. It must be sorted **manually** (a collection sorted any other way is
+   refused, because its order would mean nothing) and stay **unpublished**: it is an internal list.
 2. **Every other product from the priority brands**: Arran, GlenAllachie, Ardnahoe, Ardnamurchan (by the
    `brand_` tag).
 
 Ties are ordered by the Popular tag, then the shorter (plainer) title, then stock.
 
+If the collection can't be found or read, the agent uses the built-in list in `product_priority.json` instead and
+says so. A collection that exists but is empty means an empty list, not the fallback.
 ## What the agent does with a name
 | Typed | Result |
 |---|---|
@@ -53,23 +58,34 @@ Ties are ordered by the Popular tag, then the shorter (plainer) title, then stoc
 | Nothing orderable | **None**, with the reason (for example "Matched but out of stock: ..."). |
 
 "Meaningful words" ignore filler such as *year, old, yo, single, malt, scotch, whisky*. Numbers must match a whole
-number ("10" is not "2010"). "GlenAllachie" and "Glen Allachie" match each other, and "GA12" is read as "ga 12".
+number ("10" is not "2010"). "GlenAllachie" and "Glen Allachie" match each other, and "GA12" is read as "glenallachie 12".
 
-## Editing the quick order list
-Each entry has a `name`, `aliases` (other ways to say it) and the exact product, as `handles`, `product_ids`
-or (for something that changes) a `title_pattern`. GlenAllachie 10 Cask Strength is pinned to product
-`8436830666826` (Batch 13, a pre-order with ETA 16 Oct 2026), so **when the next batch is released, that entry
-must be pointed at the new product**, or the old batch stays the answer. A test checks that every entry's own
-name is one of its aliases and that no two entries share an alias. If a product can't be found the agent reports
-"on the quick order list but I can't find it in Shopify".
+## How names work (`orders_agent/data/product_names.json`)
+Short names are kept in the repo, not in Shopify, because product fields there are overwritten by the CMS. They
+rarely change. What people type is normalised first:
 
-### Could the list live in Shopify instead?
-Yes, and it would remove the batch problem, because staff could swap the product without a deploy. A **manual
-collection** (for example "Sales Quick Order") holds which products are on the list, and its manual sort
-order is the priority order. A collection has no place for the short names, so those would be a single-line
-product field ("short name", separated by commas) on each product in it, edited in the Shopify admin. Smart
-collections won't do: they can't keep a hand-set order.
+| Typed | Read as |
+|---|---|
+| "year old", "yo", "yr", "single malt", "scotch whisky" | dropped (so "Arran 10", "Arran 10yo" and "Arran 10 Year Old" are the same) |
+| `CS` | cask strength ("GlenAllachie 10 CS" = "GlenAllachie 10 Cask Strength") |
+| `AR` Arran, `AD` Ardnamurchan, `AH` Ardnahoe, `GA` GlenAllachie, `BA` Bunnahabhain, `LD` Ledaig, `DS` Deanston, `TWJ` The Whisky Jury | the brand, wherever it is typed ("GA 12", "AH Bholsa", "AR 10") |
+| `DD` | **any one of** Decadent Drams, Decadent Drinks, Whiskyland, Equinox & Solstice, Old Islay, Old Orkney ("DD Arran 10" finds an Arran 10 from any of them) |
 
+Each product in the collection is known by a short name worked out from its title, with filler and bracketed text
+removed: "Arran 10 Year Old Single Malt Scotch Whisky" is "Arran 10", and "GlenAllachie 12 Year Old ... [PRE-ORDER]"
+is "GlenAllachie 12". Where that isn't how people say it, `aliases` in the same file adds a name that finds
+a product **by words in its title**, not by id. For example "Arran Sherry" finds the member whose title has
+arran, sherry and cask, and "GlenAllachie 10 Cask Strength" finds the member with those words. So **when the next
+GlenAllachie 10 batch replaces this one in the collection, nothing needs editing**. If two matching products are in
+the collection at once, the agent asks which.
+
+Typing a name only picks a product directly if **everything typed** fits that product's title. "Arran 10" is Arran
+10, but "DD Arran 10" or "Arran 10 sherry cask" are not, even though "arran 10" is inside them. Those go through
+the normal ranking. If nothing has every word but part of it names quick-list products ("Arran 10 sherry"), the
+agent offers those as the closest.
+
+To add a code, a bottler to DD, or an alias: edit `product_names.json` in a pull request. Tests check that the
+codes don't clash and that every alias names a real short form.
 ## Not built yet
 Ordering frequency ("what this customer usually orders", "best sellers"). The Popular tag is used as a tie-break
 only. Real frequency needs order history, and the agent can only see the last 60 days of orders unless Shopify

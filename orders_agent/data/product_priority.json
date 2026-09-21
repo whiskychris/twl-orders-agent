@@ -30,6 +30,9 @@
 
   "include_out_of_stock_tags": ["TWL Brand"],
 
+  "quick_order_collection": "Popular Trade Products",
+  "_quick_order_comment": "The quick order list is the manual collection named above, in its own order, managed in the Shopify admin. The list below is only a FALLBACK, used when that collection can't be found or read.",
+
   "exclude": {
     "vendors": ["sample"],
     "title_patterns": {

@@ -40,6 +40,8 @@ GA10CS_B13 = product("GlenAllachie 10 Year Old Cask Strength Batch 13 Single Mal
                      ["brand_GlenAllachie", "TWL Brand", "pre-order", "abv_60"], 82, pid="gid://shopify/Product/8436830666826", eta="2026-10-16")
 # In a TWL range (Our Brands) but NOT tagged TWL Brand, so with no stock it is not offered.
 OOS_NON_BRAND = product("Ardnamurchan AD 10 Year Old Single Malt Scotch Whisky", "ardnamurchan-ad", ["brand_Ardnamurchan"], 0, our_brands=True)
+OOS_BHOLSA = product("Ardnahoe Bholsa Single Malt Scotch Whisky", "bholsa-oos", ["brand_Ardnahoe"], 0, our_brands=True)
+OOS_GA12 = product("GlenAllachie 12 Year Old Single Malt Scotch Whisky", "ga12-oos", ["brand_GlenAllachie"], 0, our_brands=True)
 GA12_PX = product("GlenAllachie 12 Year Old Pedro Ximenez Wood Single Malt Scotch Whisky", "ga12-px", ["brand_GlenAllachie", "TWL Brand"], 9, trade_core=True)
 GA10CS_B6 = product("GlenAllachie 10 Year Old Cask Strength Batch 6 Single Malt Scotch Whisky", "ga10cs-b6", ["brand_GlenAllachie", "TWL Brand"], 0, trade_core=True)
 GA10CS_B7 = product("GlenAllachie 10 Year Old Cask Strength Batch 7 Single Malt Scotch Whisky", "ga10cs-b7", ["brand_GlenAllachie", "TWL Brand"], 0, trade_core=True)
@@ -79,7 +81,7 @@ class TokenTests(unittest.TestCase):
     def test_filler_words_are_dropped(self):
         self.assertEqual(pick.tokens("Arran 10 Year Old"), ["arran", "10"])
         self.assertEqual(pick.tokens("arran 10yo"), ["arran", "10"])
-        self.assertEqual(pick.tokens("GA12"), ["ga", "12"])
+        self.assertEqual(pick.tokens("GA12"), ["glenallachie", "12"])       # ga is a brand code
         self.assertEqual(pick.tokens("The Macallan 18 Single Malt"), ["macallan", "18"])
         self.assertEqual(pick.tokens("  "), [])
         self.assertEqual(pick.tokens("Bunnahabhain's Étoile"), ["bunnahabhain", "s", "etoile"])
@@ -200,9 +202,11 @@ class QuickOrderTests(unittest.TestCase):
         self.assertEqual(result["decision"], "ask")
         self.assertEqual(names(result), [ARRAN_SHERRY["title"], ARRAN14["title"]])   # but the quick one is listed first
 
-    def test_two_quick_names_typed_together_ask(self):
+    def test_two_quick_names_typed_together_offer_both_as_the_closest(self):
         result = decide("arran 10 sherry", [ARRAN10, ARRAN_SHERRY])
         self.assertEqual(result["decision"], "ask")
+        self.assertEqual(names(result), [ARRAN10["title"], ARRAN_SHERRY["title"]])
+        self.assertIn("closest on the quick order list", result["guidance"])
 
     def test_ardnahoe_asks_between_the_two_and_bholsa_alone_is_used(self):
         self.assertEqual(decide("ardnahoe", [INFINITE, BHOLSA])["decision"], "ask")
@@ -238,14 +242,14 @@ class QuickOrderTests(unittest.TestCase):
             self.assertEqual(result["unavailable"], [])
 
     def test_a_non_twl_brand_out_of_stock_quick_product_is_reported_and_not_replaced(self):
-        entry_products = quick(**{"Ardnahoe Bholsa": [OOS_NON_BRAND]})
+        entry_products = quick(**{"Ardnahoe Bholsa": [OOS_BHOLSA]})
         result = decide("Ardnahoe Bholsa", [], entry_products)
         self.assertEqual(result["decision"], "none")
         self.assertIn("Ardnahoe Bholsa is out of stock.", result["unavailable"])
         self.assertNotIn("choice", result)
 
     def test_alternatives_are_offered_but_never_chosen_when_the_named_one_is_unavailable(self):
-        result = decide("GlenAllachie 12", [GA12_PX], quick(**{"GlenAllachie 12": [OOS_NON_BRAND]}))
+        result = decide("GlenAllachie 12", [GA12_PX], quick(**{"GlenAllachie 12": [OOS_GA12]}))
         self.assertEqual(result["decision"], "ask")
         self.assertEqual(names(result), [GA12_PX["title"]])
         self.assertIn("GlenAllachie 12 is out of stock.", result["unavailable"])
@@ -412,6 +416,61 @@ class SearchTests(unittest.TestCase):
         with self.assertRaises(ShopifyError):
             search.out_of_stock_query(["arran"], [])
 
+    def test_the_collection_is_found_by_exact_title_read_in_manual_order_and_cached(self):
+        search.clear_cache()
+        search._quick_collection.clear()
+        self.addCleanup(search._quick_collection.clear)
+        self.addCleanup(search.clear_cache)
+        node = lambda pid, title: {"id": pid, "title": title, "handle": pid, "variants": {"nodes": []}}
+        responses = {
+            search.FIND_COLLECTION: {"collections": {"nodes": [{"id": "gid://c/1", "title": "Popular Trade Products"}, {"id": "gid://c/2", "title": "Popular Trade Products Old"}]}},
+            search.COLLECTION_PRODUCTS: {"collection": {"title": "Popular Trade Products", "sortOrder": "MANUAL",
+                                                        "products": {"nodes": [node("p2", "Second"), node("p1", "First")]}}},
+        }
+        calls = []
+
+        def fake_graphql(query, variables=None):
+            calls.append((query, variables))
+            return responses[query]
+
+        with mock.patch.object(search, "graphql", side_effect=fake_graphql), \
+             mock.patch.object(search, "resolve_sources", return_value={"ourBrands": "x", "ibCollection": "x", "specialCollection": "x", "tradeCore": "x", "tradeIbs": "x", "tradeSpecial": "x"}):
+            first = search.collection_products(CONFIG, "Popular Trade Products")
+            search.collection_products(CONFIG, "Popular Trade Products")
+        self.assertEqual([p["title"] for p in first], ["Second", "First"])                  # the collection's own order is kept
+        self.assertEqual(sum(1 for q, _ in calls if q == search.FIND_COLLECTION), 1)        # the id is cached
+        self.assertEqual(calls[1][1]["id"], "gid://c/1")                                    # exact title, not "... Old"
+        self.assertEqual(calls[1][1]["first"], search.COLLECTION_MAX)
+
+    def test_a_collection_that_is_not_sorted_manually_is_refused_because_its_order_means_nothing(self):
+        search._quick_collection.clear()
+        self.addCleanup(search._quick_collection.clear)
+        responses = {
+            search.FIND_COLLECTION: {"collections": {"nodes": [{"id": "gid://c/1", "title": "Popular Trade Products"}]}},
+            search.COLLECTION_PRODUCTS: {"collection": {"title": "x", "sortOrder": "BEST_SELLING", "products": {"nodes": []}}},
+        }
+        with mock.patch.object(search, "graphql", side_effect=lambda q, v=None: responses[q]), \
+             mock.patch.object(search, "resolve_sources", return_value={}):
+            with self.assertRaises(ShopifyError) as caught:
+                search.collection_products(CONFIG, "Popular Trade Products")
+        self.assertIn("sorted manually", str(caught.exception))
+
+    def test_a_missing_or_duplicated_collection_is_refused(self):
+        for nodes in ([], [{"id": "a", "title": "Popular Trade Products"}, {"id": "b", "title": "Popular Trade Products"}]):
+            search._quick_collection.clear()
+            with mock.patch.object(search, "graphql", return_value={"collections": {"nodes": nodes}}):
+                with self.assertRaises(ShopifyError):
+                    search.collection_products(CONFIG, "Popular Trade Products")
+        search._quick_collection.clear()
+
+    def test_a_collection_that_vanishes_after_being_cached_is_forgotten(self):
+        search._quick_collection["Popular Trade Products"] = ("gid://c/1", search.time.time())
+        with mock.patch.object(search, "graphql", return_value={"collection": None}), \
+             mock.patch.object(search, "resolve_sources", return_value={}):
+            with self.assertRaises(ShopifyError):
+                search.collection_products(CONFIG, "Popular Trade Products")
+        self.assertNotIn("Popular Trade Products", search._quick_collection)
+
     def test_the_pre_order_eta_is_read_from_the_metafield(self):
         base = {"id": "i", "title": "t", "handle": "h", "variants": {"nodes": []}}
         self.assertEqual(search._product({**base, "preOrderEta": {"value": " 2026-10-16 "}})["pre_order_eta"], "2026-10-16")
@@ -448,9 +507,17 @@ class SearchTests(unittest.TestCase):
 class FindForOrderTests(unittest.TestCase):
     """The orchestration: which Shopify searches are made, with search faked."""
 
-    def run_find(self, query, pool, by_handle=None, everything=None, oos_pool=None, include_inventory=False):
+    def run_find(self, query, pool, by_handle=None, everything=None, oos_pool=None, include_inventory=False, members=None):
+        """`members` are the products in the Popular Trade Products collection, in order. None means the
+        collection can't be read, so the built-in list is used."""
         calls = []
         catalog = by_handle if by_handle is not None else BY_HANDLE
+
+        def fake_collection(config, title):
+            calls.append(f"collection:{title}")
+            if members is None:
+                raise ShopifyError(f"The collection '{title}' was not found.")
+            return members
 
         def fake_search(config, shopify_query, limit=50):
             calls.append(shopify_query)
@@ -463,8 +530,15 @@ class FindForOrderTests(unittest.TestCase):
                 return oos_pool if oos_pool is not None else []
             return everything if everything is not None else []
 
-        with mock.patch.object(search, "search", side_effect=fake_search):
+        with mock.patch.object(search, "search", side_effect=fake_search), \
+             mock.patch.object(search, "collection_products", side_effect=fake_collection):
             return pick.find_for_order(query, include_inventory), calls
+
+    def test_when_the_collection_cannot_be_read_the_built_in_list_is_used_and_says_so(self):
+        result, calls = self.run_find("Arran 10", [ARRAN10], members=None)
+        self.assertEqual(result["decision"], "use")
+        self.assertIn("collection:Popular Trade Products", calls)
+        self.assertIn("built-in quick order list was used", result["note"])
 
     def test_arran_10_end_to_end(self):
         result, calls = self.run_find("Arran 10 Year Old", [ARRAN10, ARRAN_IB, BARLEY_IN_STOCK])
@@ -509,6 +583,180 @@ class FindForOrderTests(unittest.TestCase):
         searched.assert_not_called()
 
 
+# Members of the Popular Trade Products collection, as the collection returns them (the order is the priority).
+COLLECTION = [ARRAN10, ARRAN_SHERRY, GA12, GA10CS_B13, REMNANT, INFINITE, BHOLSA]
+
+
+class AbbreviationTests(unittest.TestCase):
+    def test_every_code_you_gave_expands(self):
+        expected = {
+            "ar 10": ["arran", "10"], "ad 10": ["ardnamurchan", "10"], "ah bholsa": ["ardnahoe", "bholsa"],
+            "ga 12": ["glenallachie", "12"], "ba 12": ["bunnahabhain", "12"], "ld 10": ["ledaig", "10"],
+            "ds 12": ["deanston", "12"], "twj ledaig": ["whisky", "jury", "ledaig"],
+        }
+        for typed, tokens in expected.items():
+            self.assertEqual(pick.tokens(typed), tokens, typed)
+
+    def test_year_old_is_dropped_or_written_yo_and_cask_strength_is_cs(self):
+        same = ["glenallachie 10 cask strength", "GlenAllachie 10 CS", "GlenAllachie 10yo CS", "glenallachie 10 year old cask strength",
+                "GA 10 CS", "ga 10yo cs", "GA10CS"]
+        for typed in same:
+            self.assertEqual(pick.tokens(typed), ["glenallachie", "10", "cask", "strength"], typed)
+        for typed in ("Arran 10", "Arran 10yo", "Arran 10 Year Old", "arran 10 yr old", "AR 10", "AR 10yo"):
+            self.assertEqual(pick.tokens(typed), ["arran", "10"], typed)
+
+    def test_dd_means_any_one_of_the_bottlers(self):
+        for title in ("Decadent Drams 2014 Arran 10 Year Old Sherry Hogshead", "Decadent Drinks 2013 Arran 10 Cask", "Whiskyland 2015 Arran 10",
+                      "Equinox & Solstice Arran 10 Year Old", "Old Islay Arran 10", "Old Orkney Arran 10"):
+            self.assertTrue(pick.title_matches(pick.tokens("DD arran 10"), title), title)
+        for title in ("Adelphi 2014 Arran 10", "Arran 10 Year Old Single Malt", "Old Pulteney Arran 10"):
+            self.assertFalse(pick.title_matches(pick.tokens("DD arran 10"), title), title)
+
+    def test_the_dd_search_offers_shopify_the_alternatives(self):
+        groups = pick.load_names()["groups"]
+        query = search.title_query(pick.tokens("dd arran 10"), in_stock=True, groups=groups)
+        self.assertIn("title:*arran*", query)
+        self.assertIn("(title:*decadent* AND title:*drams*)", query)
+        self.assertIn("title:*whiskyland*", query)
+        self.assertIn("(title:*old* AND title:*islay*)", query)
+        self.assertIn(" OR ", query)
+        self.assertTrue(query.endswith("status:active AND inventory_total:>0"))
+
+    def test_a_group_code_never_reaches_shopify_as_a_literal_word(self):
+        query = search.title_query(pick.tokens("dd arran"), groups=pick.load_names()["groups"])
+        self.assertNotIn("title:*dd*", query)
+
+    def test_codes_typed_inside_longer_words_are_left_alone(self):
+        self.assertEqual(pick.tokens("gaelic"), ["gaelic"])
+        self.assertEqual(pick.tokens("ardbeg"), ["ardbeg"])
+        self.assertEqual(pick.tokens("ledaig"), ["ledaig"])
+
+    def test_the_names_file_is_consistent(self):
+        names = pick.load_names()
+        for code in ("ar", "ad", "ah", "ga", "ba", "ld", "ds", "twj", "cs"):
+            self.assertIn(code, names["abbreviations"])
+        self.assertEqual(len(names["groups"]["dd"]), 6)
+        self.assertFalse(set(names["abbreviations"]) & set(names["groups"]))
+        for alias in names["aliases"]:
+            self.assertTrue(alias["title_has"] and alias["say"])
+
+
+class CollectionEntryTests(unittest.TestCase):
+    """The quick order list from the Popular Trade Products collection."""
+
+    def entries(self, members=COLLECTION):
+        return pick.collection_entries(members)
+
+    def decide(self, query, pool=(), members=COLLECTION):
+        entries = self.entries(members)
+        quick_products = {e["name"]: e["products"] for e in entries}
+        return pick.decide(query, CONFIG, list(pool), quick_products, entries=entries)
+
+    def test_short_names_come_from_the_titles(self):
+        names = [e["name"] for e in self.entries()]
+        self.assertEqual(names, [
+            "Arran 10", "Arran Sherry", "GlenAllachie 12", "GlenAllachie 10 Cask Strength",
+            "Remnant Golden Fleece", "Ardnahoe Infinite Loch", "Ardnahoe Bholsa"])
+
+    def test_the_names_you_use_all_work(self):
+        cases = {
+            "Arran 10": ARRAN10, "Arran 10yo": ARRAN10, "AR 10": ARRAN10, "arran 10 year old": ARRAN10,
+            "GlenAllachie 10 CS": GA10CS_B13, "GlenAllachie 10yo CS": GA10CS_B13, "GA 10 CS": GA10CS_B13,
+            "GlenAllachie 10 Cask Strength": GA10CS_B13, "ga10cs": GA10CS_B13,
+            "GlenAllachie 12": GA12, "GA 12": GA12, "GlenAllachie 12yo": GA12,
+            "Arran Sherry": ARRAN_SHERRY, "AR Sherry": ARRAN_SHERRY,
+            "Remnant Golden Fleece": REMNANT, "golden fleece": REMNANT,
+            "Ardnahoe Infinite Loch": INFINITE, "AH Infinite Loch": INFINITE, "Ardnahoe Bholsa": BHOLSA, "AH Bholsa": BHOLSA,
+        }
+        for typed, expected in cases.items():
+            result = self.decide(typed)
+            self.assertEqual(result["decision"], "use", typed)
+            self.assertEqual(result["choice"]["name"], expected["title"], typed)
+
+    def test_a_new_batch_needs_no_edit_anywhere(self):
+        batch_14 = product("GlenAllachie 10 Year Old Cask Strength Batch 14 Single Malt Scotch Whisky", "ga10cs-b14",
+                           ["brand_GlenAllachie", "TWL Brand", "abv_59"], 60)
+        swapped = [ARRAN10, ARRAN_SHERRY, GA12, batch_14, REMNANT, INFINITE, BHOLSA]      # staff swapped the product in the collection
+        result = self.decide("GA 10 CS", members=swapped)
+        self.assertEqual((result["decision"], result["choice"]["name"]), ("use", batch_14["title"]))
+
+    def test_two_batches_in_the_collection_at_once_ask_which(self):
+        result = self.decide("GlenAllachie 10 CS", members=COLLECTION + [GA10CS_B7])
+        self.assertEqual(result["decision"], "ask")
+        self.assertEqual(len(result["options"]), 2)
+
+    def test_the_collections_order_is_the_priority_order(self):
+        result = self.decide("arran", [ARRAN14])
+        self.assertEqual(names(result)[:3], [ARRAN10["title"], ARRAN_SHERRY["title"], ARRAN14["title"]])
+        reordered = [ARRAN_SHERRY, ARRAN10] + COLLECTION[2:]
+        result = self.decide("arran", [ARRAN14], members=reordered)
+        self.assertEqual(names(result)[:3], [ARRAN_SHERRY["title"], ARRAN10["title"], ARRAN14["title"]])
+
+    def test_removing_a_product_from_the_collection_removes_its_priority(self):
+        without = [p for p in COLLECTION if p is not ARRAN_SHERRY]
+        result = self.decide("arran", [ARRAN14, ARRAN_SHERRY], members=without)
+        self.assertEqual(names(result)[0], ARRAN10["title"])
+        self.assertNotIn("Quick order list: Arran Sherry", next(o for o in result["options"] if o["name"] == ARRAN_SHERRY["title"])["why"])
+
+    def test_a_product_added_to_the_collection_works_by_its_derived_name(self):
+        newcomer = product("Ardnamurchan AD 10 Year Old Single Malt Scotch Whisky", "ard-ad10", ["brand_Ardnamurchan", "TWL Brand"], 30, our_brands=True)
+        entries = pick.collection_entries(COLLECTION + [newcomer])
+        self.assertEqual(entries[-1]["name"], "Ardnamurchan AD 10")
+        quick_products = {e["name"]: e["products"] for e in entries}
+        result = pick.decide("AD 10", CONFIG, [], quick_products, entries=entries)
+        self.assertEqual((result["decision"], result["choice"]["name"]), ("use", newcomer["title"]))
+
+    def test_bracketed_text_is_ignored_when_working_out_a_name(self):
+        entry = self.entries([product("GlenAllachie 15 Year Old Single Malt Scotch Whisky [PRE-ORDER]", "g15", ["TWL Brand"])])[0]
+        self.assertEqual(entry["name"], "GlenAllachie 15")
+        self.assertIn(frozenset({"glenallachie", "15"}), entry["_aliases"])
+
+    def test_two_members_with_the_same_short_name_stay_distinct(self):
+        twin = product(ARRAN10["title"], "arran-10-twin", ["brand_Arran", "TWL Brand"], 5)
+        names_ = [e["name"] for e in pick.collection_entries([ARRAN10, twin])]
+        self.assertEqual(len(set(names_)), 2)
+
+    def test_an_empty_collection_is_an_empty_list_not_the_fallback(self):
+        with mock.patch.object(search, "collection_products", return_value=[]):
+            entries, note = pick.quick_entries(CONFIG)
+        self.assertEqual((entries, note), ([], None))
+
+    def test_an_unreadable_collection_falls_back_with_a_note(self):
+        with mock.patch.object(search, "collection_products", side_effect=ShopifyError("nope")):
+            entries, note = pick.quick_entries(CONFIG)
+        self.assertEqual(entries, CONFIG["quick_order"])
+        self.assertIn("couldn't be read", note)
+
+    def test_the_end_to_end_lookup_uses_the_collection_and_needs_no_product_lookups_for_it(self):
+        result, calls = FindForOrderTests().run_find("GlenAllachie 10yo CS", [], members=COLLECTION)
+        self.assertEqual((result["decision"], result["choice"]["name"]), ("use", GA10CS_B13["title"]))
+        self.assertNotIn("note", result)
+        self.assertFalse([c for c in calls if c.startswith("handle:") or c.startswith("id:")])
+
+    def test_dd_finds_the_bottlers_products_end_to_end(self):
+        decadent = product("Decadent Drams 2014 Arran 10 Year Old Sherry Hogshead Single Cask Single Malt Scotch Whisky", "dd-arran",
+                           ["brand_Decadent Drams", "TWL IB", "brand_Arran"], 4, ib_collection=True)
+        result, calls = FindForOrderTests().run_find("DD arran 10", [decadent], members=COLLECTION)
+        self.assertEqual(result["decision"], "use")          # the only DD Arran 10, NOT the core Arran 10
+        self.assertEqual(result["choice"]["name"], decadent["title"])
+        self.assertTrue(any("(title:*decadent* AND title:*drams*)" in c for c in calls))
+        second = product("Whiskyland 2015 Arran 10 Year Old Single Cask Single Malt Scotch Whisky", "wl-arran", ["brand_Whiskyland", "TWL IB", "brand_Arran"], 3, ib_collection=True)
+        both, _ = FindForOrderTests().run_find("DD arran 10", [decadent, second], members=COLLECTION)
+        self.assertEqual(both["decision"], "ask")
+        self.assertEqual(len(both["options"]), 2)
+
+    def test_extra_words_stop_a_quick_entry_being_an_exact_match(self):
+        # "arran 10" is Arran 10, but adding words that the core product doesn't have means something else was meant.
+        sherry_10 = product("Arran 10 Year Old Sherry Cask Finish Single Malt Scotch Whisky", "a10s", ["brand_Arran", "TWL Brand"], 5, trade_core=True)
+        pool = [ARRAN10, sherry_10, ARRAN_SHERRY]
+        result = self.decide("arran 10 sherry cask", pool)
+        self.assertEqual(result["decision"], "use")
+        self.assertEqual(result["choice"]["name"], sherry_10["title"])          # not Arran 10, not Arran Sherry
+        self.assertNotEqual(self.decide("arran 10", pool)["choice"]["name"], sherry_10["title"])
+        adelphi = self.decide("adelphi arran 10", [ARRAN_IB, ARRAN10])
+        self.assertEqual(adelphi["choice"]["name"], ARRAN_IB["title"])          # never the core Arran 10
+
+
 class ConfigTests(unittest.TestCase):
     def test_the_shipped_config_is_complete(self):
         self.assertEqual([e["name"] for e in CONFIG["quick_order"]], [
@@ -527,7 +775,7 @@ class ConfigTests(unittest.TestCase):
     def test_aliases_do_not_collide_between_entries(self):
         seen = {}
         for entry in CONFIG["quick_order"]:
-            for alias in entry["_aliases"]:
+            for alias in set(entry["_aliases"]):      # abbreviations can make two of one entry's aliases identical
                 self.assertNotIn(alias, seen, f"{entry['name']} and {seen.get(alias)} share an alias")
                 seen[alias] = entry["name"]
 

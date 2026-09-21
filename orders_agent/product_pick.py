@@ -15,6 +15,16 @@ bottler casks, samples, a gift pack. TWL's rules (data/product_priority.json) sa
   Ahead of the ranges   the quick order list (the products sales orders most), then every other product
                         from the priority brands (Arran, GlenAllachie, Ardnahoe, Ardnamurchan).
 
+The quick order list is the manual Shopify collection "Popular Trade Products", in its own order, so staff
+manage it in the Shopify admin. Each member is known by a short name worked out from its title ("Arran 10
+Year Old Single Malt Scotch Whisky" is "Arran 10"), plus the exceptions in data/product_names.json, which
+match by words in the title (so a new batch needs no edit). If the collection can't be read, the built-in
+list in product_priority.json is used instead.
+
+What people type is normalised first (data/product_names.json): filler like "year old" and "yo" is dropped,
+codes like GA, AH and CS are expanded (GA = GlenAllachie, CS = cask strength), and DD stands for any one of
+several bottlers.
+
 The answer is one of:
   use   one clear winner. The agent uses it and says which it chose.
   ask   several plausible products. The agent lists the numbered options and asks. It never picks.
@@ -28,6 +38,7 @@ words). A partial match on the quick order list only lifts a product in the list
 """
 
 import json
+import logging
 import re
 import unicodedata
 from datetime import date
@@ -36,7 +47,10 @@ from pathlib import Path
 from .sources import product_search as search
 from .sources.shopify import ShopifyError
 
+log = logging.getLogger("orders_agent.product_pick")
+
 CONFIG_PATH = Path(__file__).parent / "data" / "product_priority.json"
+NAMES_PATH = Path(__file__).parent / "data" / "product_names.json"
 
 # Words that say nothing about WHICH product. Dropped from what people type ("Arran 10 Year Old").
 STOP = frozenset({"year", "years", "yo", "yr", "yrs", "y", "old", "single", "malt", "scotch", "whisky", "whiskey", "the", "and", "of", "a"})
@@ -46,9 +60,39 @@ POOL_SIZE = 50
 NOT_FOUND = 99
 
 _config = {"value": None}
+_names = {"value": None}
 
 
 # --- configuration ------------------------------------------------------------------------------------
+
+
+def load_names():
+    """data/product_names.json: brand codes, group codes and title-word exceptions."""
+    if _names["value"] is not None:
+        return _names["value"]
+    raw = json.loads(NAMES_PATH.read_text(encoding="utf-8"))
+
+    def real(section):
+        return {key.lower(): value for key, value in raw[section].items() if not key.startswith("_")}
+
+    abbreviations = {short: _runs(full) for short, full in real("abbreviations").items()}
+    groups = {code: [_runs(alternative) for alternative in alternatives] for code, alternatives in real("groups").items()}
+    for code, expansion in list(abbreviations.items()) + [(code, None) for code in groups]:
+        if expansion is not None and not expansion:
+            raise RuntimeError(f"product_names.json: abbreviation '{code}' expands to nothing")
+    if set(abbreviations) & set(groups):
+        raise RuntimeError("product_names.json: a code can't be both an abbreviation and a group")
+    for code, alternatives in groups.items():
+        if not alternatives or not all(alternatives):
+            raise RuntimeError(f"product_names.json: group '{code}' has an empty alternative")
+
+    aliases = []
+    for alias in raw["aliases"]:
+        if not alias.get("name") or not alias.get("say") or not alias.get("title_has"):
+            raise RuntimeError(f"product_names.json: alias {alias.get('name')!r} needs a name, say and title_has")
+        aliases.append({"name": alias["name"], "say": list(alias["say"]), "title_has": [w.lower() for w in alias["title_has"]]})
+    _names["value"] = {"abbreviations": abbreviations, "groups": groups, "aliases": aliases}
+    return _names["value"]
 
 
 def load_config():
@@ -87,26 +131,38 @@ def _runs(text):
 
 
 def tokens(text):
-    """The meaningful words of a name, lower case, without filler like 'year old'. Order kept."""
+    """The meaningful words of a name, lower case, without filler like 'year old', and with brand codes
+    expanded ('ga' -> glenallachie, 'cs' -> cask strength). A group code such as 'dd' is kept as it is, and
+    is expanded where it is matched. Order kept."""
+    abbreviations = load_names()["abbreviations"]
     seen, result = set(), []
     for run in _runs(text):
-        if run not in STOP and run not in seen:
-            seen.add(run)
-            result.append(run)
+        if run in STOP:
+            continue
+        for word in abbreviations.get(run, [run]):
+            if word not in seen:
+                seen.add(word)
+                result.append(word)
     return result
+
+
+def _word_matches(word, runs, joined):
+    if word.isdigit() or len(word) < 3:
+        return word in runs
+    return any(word in run for run in runs) or word in joined
 
 
 def title_matches(query_tokens, title):
     """True if every meaningful word typed is in the title. Numbers must match a whole number ("10" is
     not "2010"). Words of three letters or more may match part of a word or two joined words, so
-    "glen allachie" finds GlenAllachie and "glenallachie" finds Glen Allachie."""
+    "glen allachie" finds GlenAllachie and "glenallachie" finds Glen Allachie. A group code such as 'dd'
+    matches if the title has any one of its alternatives (Decadent Drams, or Whiskyland, or ...)."""
+    groups = load_names()["groups"]
     runs = _runs(title)
     joined = "".join(runs)
     for token in query_tokens:
-        if token.isdigit() or len(token) < 3:
-            if token not in runs:
-                return False
-        elif not any(token in run for run in runs) and token not in joined:
+        alternatives = groups.get(token) or [[token]]
+        if not any(all(_word_matches(word, runs, joined) for word in alternative) for alternative in alternatives):
             return False
     return True
 
@@ -253,12 +309,12 @@ def _option(number, item, include_inventory, quick_name=None):
 # --- quick order list ---------------------------------------------------------------------------------
 
 
-def _entries(config, query_tokens):
+def _entries(entries, query_tokens):
     """(exact, related): quick order entries whose name the user has typed in full, and entries whose name
     contains what they typed. 'arran 10 year old' is exact for Arran 10. 'arran' is related to both Arran
     entries. An entry that is a strict subset of another exact entry is dropped, so the longer name wins."""
     typed = frozenset(query_tokens)
-    exact = [e for e in config["quick_order"] if any(alias <= typed for alias in e["_aliases"])]
+    exact = [e for e in entries if any(alias <= typed for alias in e["_aliases"])]
     keep = []
     for entry in exact:
         mine = max((a for a in entry["_aliases"] if a <= typed), key=len)
@@ -267,10 +323,59 @@ def _entries(config, query_tokens):
         ):
             keep.append(entry)
     related = [
-        e for e in config["quick_order"]
+        e for e in entries
         if e not in keep and typed and any(typed <= alias for alias in e["_aliases"])
     ]
     return keep, related
+
+
+_BRACKETED = re.compile(r"\[[^\]]*\]|\([^)]*\)")
+_DISPLAY_FILLER = re.compile(r"\b(?:single malt|scotch whisky|whisky|years? old)\b", re.I)
+
+
+def _short_name(title):
+    """A title with the filler taken out, for showing people: 'Arran 10 Year Old Single Malt Scotch Whisky'
+    is 'Arran 10'."""
+    return " ".join(_DISPLAY_FILLER.sub(" ", _BRACKETED.sub(" ", title)).split())
+
+
+def collection_entries(members, names=None):
+    """Quick order entries from the members of the Popular Trade Products collection, in its order. Each is
+    known by the short name worked out from its title, plus any exception in product_names.json whose
+    `title_has` words are in the title (that is how 'GlenAllachie 10 Cask Strength' finds Batch 13 today and
+    Batch 14 later, with nothing to edit)."""
+    names = names or load_names()
+    entries, used = [], {}
+    for product in members:
+        title = product["title"]
+        aliases = {frozenset(tokens(_BRACKETED.sub(" ", title)))}
+        display = _short_name(title)
+        for exception in names["aliases"]:
+            if title_matches(exception["title_has"], title):
+                aliases.update(frozenset(tokens(phrase)) for phrase in exception["say"])
+                display = exception["name"]
+        used[display] = used.get(display, 0) + 1
+        entries.append({
+            "name": display if used[display] == 1 else f"{display} ({used[display]})",
+            "_aliases": [alias for alias in aliases if alias],
+            "products": [product],
+        })
+    return entries
+
+
+def quick_entries(config):
+    """(entries, note): the quick order list. It is the manual collection named in the config, read live, so
+    staff change it in Shopify. If the collection can't be found or read, the built-in list in the config is
+    used, and the note says so. A collection that exists but is empty means an empty list, not the fallback."""
+    title = config.get("quick_order_collection")
+    if title:
+        try:
+            return collection_entries(search.collection_products(config, title)), None
+        except ShopifyError as exc:
+            log.warning("quick order collection unavailable, using the built-in list: %s", exc)
+            note = f"The '{title}' collection couldn't be read, so the built-in quick order list was used."
+            return config["quick_order"], note
+    return config["quick_order"], None
 
 
 def _entry_products(config, entry):
@@ -333,14 +438,26 @@ def _rank_key(item):
     return (item["brand_rank"], item["tier"])
 
 
-def decide(query, config, pool, quick_products, include_inventory=False):
+def decide(query, config, pool, quick_products, include_inventory=False, entries=None):
     """Pure. `pool` is the search results for what was typed (in stock). `quick_products` maps a quick
-    order entry name to the products it points at. Returns the decision dict."""
+    order entry name to the products it points at. `entries` is the quick order list, in priority order
+    (the built-in list if not given). Returns the decision dict."""
     query_tokens = tokens(query)
     if not query_tokens:
         raise ShopifyError("Give me a product name to look for.")
-    exact, related = _entries(config, query_tokens)
-    order = {entry["name"]: index for index, entry in enumerate(config["quick_order"])}
+    entries = config["quick_order"] if entries is None else entries
+    exact, related = _entries(entries, query_tokens)
+    # Typing an entry's name is only an exact match if EVERYTHING typed fits that product. "arran 10" is
+    # Arran 10, but "dd arran 10" or "arran 10 sherry cask" are not, even though "arran 10" is in them.
+    # An entry whose product can't be found at all stays exact, so the person is told it is missing.
+    fits = [
+        e for e in exact
+        if not quick_products.get(e["name"]) or any(title_matches(query_tokens, p["title"]) for p in quick_products[e["name"]])
+    ]
+    demoted = [e for e in exact if e not in fits]
+    related = related + demoted
+    exact = fits
+    order = {entry["name"]: index for index, entry in enumerate(entries)}
     quick_index, quick_name = {}, {}
     for entry in exact + related:
         for product in quick_products.get(entry["name"], []):
@@ -386,6 +503,14 @@ def decide(query, config, pool, quick_products, include_inventory=False):
                 products.append(product)
                 seen.add(product["id"])
     items, left_out = _items(products, config, quick_index)
+    if not items and demoted:
+        # Nothing has every word typed, but part of it names quick order products ("arran 10 sherry" is
+        # torn between Arran 10 and Arran Sherry). Offer those as the closest, for the person to choose.
+        near, _ = _items([p for e in demoted for p in quick_products.get(e["name"], [])], config, quick_index)
+        if near:
+            near.sort(key=_sort_key)
+            return _ask(near, include_inventory, quick_name, unavailable,
+                        lead="Nothing matches all of that. The closest on the quick order list:")
     if not items:
         return _none(unavailable, left_out)
     items.sort(key=_sort_key)
@@ -450,25 +575,37 @@ def find_for_order(query, include_inventory=False):
     query_tokens = tokens(query)
     if not query_tokens:
         raise ShopifyError("Give me a product name to look for.")
+    groups = load_names()["groups"]
 
-    exact, related = _entries(config, query_tokens)
-    quick_products = {entry["name"]: _entry_products(config, entry) for entry in exact + related}
-    pool = search.search(config, search.title_query(query_tokens, in_stock=True), POOL_SIZE)
+    entries, note = quick_entries(config)
+    exact, related = _entries(entries, query_tokens)
+    # Collection entries already carry their product. The built-in fallback entries are looked up.
+    quick_products = {
+        entry["name"]: entry["products"] if "products" in entry else _entry_products(config, entry)
+        for entry in exact + related
+    }
+    pool = search.search(config, search.title_query(query_tokens, in_stock=True, groups=groups), POOL_SIZE)
     full = len(pool) >= POOL_SIZE
     if config["include_out_of_stock_tags"]:
         # Products that may be ordered out of stock (TWL Brand) are searched separately, so they are
         # found even when plenty of in-stock products match the same words.
-        more = search.search(config, search.out_of_stock_query(query_tokens, config["include_out_of_stock_tags"]), POOL_SIZE)
+        more = search.search(
+            config, search.out_of_stock_query(query_tokens, config["include_out_of_stock_tags"], groups), POOL_SIZE
+        )
         full = full or len(more) >= POOL_SIZE
         have = {p["id"] for p in pool}
         pool = pool + [p for p in more if p["id"] not in have]
 
-    decision = decide(query, config, pool, quick_products, include_inventory)
-    if full:
-        decision["note"] = "Many products matched, so some may not be shown. A fuller name narrows it."
+    decision = decide(query, config, pool, quick_products, include_inventory, entries)
+    notes = [text for text in (
+        note,
+        "Many products matched, so some may not be shown. A fuller name narrows it." if full else None,
+    ) if text]
+    if notes:
+        decision["note"] = " ".join(notes)
     if decision["decision"] == "none":
         # Say why: the matches that exist but are out of stock.
-        everything = search.search(config, search.title_query(query_tokens, in_stock=False), 20)
+        everything = search.search(config, search.title_query(query_tokens, in_stock=False, groups=groups), 20)
         _, left_out = _items([p for p in everything if title_matches(query_tokens, p["title"])], config, {})
         extra = _none([], {k: v for k, v in left_out.items() if k == "no_stock"})["unavailable"]
         decision["unavailable"] = decision["unavailable"] + extra
