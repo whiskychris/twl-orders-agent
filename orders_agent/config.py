@@ -18,6 +18,7 @@ SHOPIFY_SECRET = os.environ.get("SHOPIFY_CONFIG_SECRET", "twl-shopify-config")
 CACHE_SECONDS = 300
 
 USE_ROLE = "orders.use"  # the gateway's role: may this person use the orders assistant at all
+APPROVE_ROLE = "orders.approve"  # the gateway's role: may this person approve creating an order
 AUTHZ_SECRET = os.environ.get("ORDERS_AUTHZ_SECRET", "twl-orders-authz")  # who sees what
 
 _cache = {"value": None, "loaded_at": 0.0}

@@ -20,6 +20,7 @@ never decides, and nothing the user types can change it.
 | `products` | `search_products` | |
 | `inventory` | `get_inventory`, `low_stock` | stock quantities in `search_products` |
 | `customers` | `search_customers` | customer, shipping address and order note fields on orders; free-text order search |
+| `order_entry` | `find_customer`, `find_variant`, `prepare_draft_order` | preparing a draft order. Allowed in a DM and in `order_entry_channels` only. Approval and creation are separate (`docs/order-entry.md`) |
 
 Add a capability by adding it to `CAPABILITIES` in `orders_agent/authorization.py`, registering the tools
 under it in `tools.py`, and adding tests.

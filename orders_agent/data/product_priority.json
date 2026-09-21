@@ -1,0 +1,82 @@
+{
+  "_comment": "How order entry picks products. Edit this file (through a pull request) to change priorities. See docs/product-selection.md. Names must match Shopify exactly: a missing collection, catalog or tag makes product picking refuse loudly instead of ranking wrongly.",
+
+  "tiers": {
+    "1": {
+      "collection": "Our Brands",
+      "catalog": "Trade Core",
+      "tags": ["TWL Brand", "productGroup_twl-brand"]
+    },
+    "2": {
+      "collection": "TWL Independent Bottlers",
+      "catalog": "Trade IBs",
+      "tags": ["TWL IB", "TWL IBs", "productGroup_twl-ib"]
+    },
+    "3": {
+      "collection": "Special Releases",
+      "catalog": "Trade Special Releases",
+      "tags": ["productGroup_twl-exclusive"]
+    },
+    "4": {
+      "collection": null,
+      "catalog": null,
+      "tags": ["partnerStore_The Whisky List Shop"]
+    }
+  },
+
+  "priority_brands": ["Arran", "GlenAllachie", "Ardnahoe", "Ardnamurchan"],
+
+  "popular_tags": ["Popular", "productGroup_popular"],
+
+  "include_out_of_stock_tags": ["TWL Brand"],
+
+  "quick_order_collection": "Popular Trade Products",
+  "_quick_order_comment": "The quick order list is the manual collection named above, in its own order, managed in the Shopify admin. The list below is only a FALLBACK, used when that collection can't be found or read.",
+
+  "exclude": {
+    "vendors": ["sample"],
+    "title_patterns": {
+      "sample": "^\\[SAMPLE\\]",
+      "gift": "\\bgift\\b",
+      "bottle_split": "bottle[\\s-]*split"
+    }
+  },
+
+  "quick_order": [
+    {
+      "name": "Arran 10",
+      "aliases": ["arran 10"],
+      "handles": ["arran-10"]
+    },
+    {
+      "name": "Arran Sherry",
+      "aliases": ["arran sherry", "arran sherry cask", "arran bodega"],
+      "handles": ["arran-sherry-cask-the-bodega-single-malt-scotch-whisky"]
+    },
+    {
+      "name": "GlenAllachie 12",
+      "aliases": ["glenallachie 12", "glen allachie 12", "ga 12"],
+      "handles": ["glenallachie-12-year-old-single-malt-scotch-whisky"]
+    },
+    {
+      "name": "GlenAllachie 10 Cask Strength",
+      "aliases": ["glenallachie 10 cask strength", "glen allachie 10 cask strength", "glenallachie 10 cs", "ga 10 cs", "ga 10 cask strength"],
+      "product_ids": ["gid://shopify/Product/8436830666826"]
+    },
+    {
+      "name": "Remnant Golden Fleece",
+      "aliases": ["remnant golden fleece", "golden fleece", "remnant fleece"],
+      "handles": ["remnant-golden-fleece-australian-single-malt-scotch-whisky-500ml"]
+    },
+    {
+      "name": "Ardnahoe Infinite Loch",
+      "aliases": ["ardnahoe infinite loch", "infinite loch"],
+      "handles": ["ardnahoe-infinite-loch-single-malt-scotch-whisky"]
+    },
+    {
+      "name": "Ardnahoe Bholsa",
+      "aliases": ["ardnahoe bholsa", "bholsa"],
+      "handles": ["ardnahoe-bholsa-single-malt-scotch-whisky"]
+    }
+  ]
+}

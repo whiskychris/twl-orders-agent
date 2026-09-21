@@ -17,11 +17,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-from .authorization import audit_tool
-from .sources import shopify
+from . import entry, product_pick
+from .authorization import ORDER_ENTRY, audit_tool
+from .sources import draft_orders, shopify
 
 SERVER_NAME = "orders_data"
-VERSION = "2.0.0"
+VERSION = "3.0.0"
 
 try:
     SYDNEY = ZoneInfo("Australia/Sydney")
@@ -51,8 +52,18 @@ INTEGER = {"type": "integer"}
 BOOLEAN = {"type": "boolean"}
 
 
-def build_server(ctx):
+class RequestState:
+    """What the tools produced during one request. When prepare_draft_order succeeds, main.py posts
+    `text` (written in code from Shopify's numbers) with `proposal`, instead of the model's own words."""
+
+    def __init__(self):
+        self.proposal = None
+        self.text = None
+
+
+def build_server(ctx, state=None):
     """Return (server, tool_names) for the caller described by this AuthContext."""
+    state = state if state is not None else RequestState()
     tools = []
     names = []
 
@@ -281,6 +292,120 @@ def build_server(ctx):
                 required=["query"],
             ),
             search_customers,
+        )
+
+    # --- order entry capability ---------------------------------------------------------------
+    # None of these can create anything. prepare_draft_order only prices a draft and hands it to the
+    # approval flow. Creating the order happens later, in /v1/act, in code, after an approver presses a
+    # button. Customer contact details are never returned: only company and location names, and an
+    # individual customer's name.
+
+    if ctx.has(ORDER_ENTRY):
+
+        async def find_customer(args):
+            return await call(
+                "find_customer", ORDER_ENTRY, draft_orders.find_customers, args.get("query", ""), limit=args.get("limit", 5)
+            )
+
+        add(
+            "find_customer",
+            "Find an existing customer by name, to raise an order for. Returns business customers "
+            "(`companies`, each with company_id and its locations with location_id) and individual "
+            "customers (`individual_customers`, each with customer_id). Orders for a company use its "
+            "company_id and a location_id, and get the company's own prices. Orders for an individual use "
+            "the customer_id. If more than one matches, or a company has several locations, ask which one "
+            "is meant. Never guess. New customers can't be created.",
+            _schema(
+                {
+                    "query": {**STRING, "description": "Part of the customer or company name."},
+                    "limit": {**INTEGER, "description": "How many of each kind, 1 to 10. Default 5."},
+                },
+                required=["query"],
+            ),
+            find_customer,
+        )
+
+        async def find_variant(args):
+            return await call(
+                "find_variant",
+                ORDER_ENTRY,
+                product_pick.find_for_order,
+                args.get("query", ""),
+                include_inventory=ctx.has("inventory"),
+            )
+
+        add(
+            "find_variant",
+            "Find the product to order from what the user typed (for example 'Arran 10' or 'Ardnahoe "
+            "Bholsa'). TWL's rules choose, not you. The answer has a `decision`: 'use' means one clear winner "
+            "(use its variant_id and tell the user which product you chose); 'ask' means several plausible "
+            "products (list the numbered options and ask which, and never pick for them); 'none' means nothing "
+            "orderable matched (say so, and mention anything in `unavailable`, such as out of stock). Samples, "
+            "gift packs, bottle splits and out-of-stock products are never offered. Use only variant_ids this "
+            "tool returned. Search by name: SKUs are not usable.",
+            _schema(
+                {"query": {**STRING, "description": "The product as the user named it, for example 'Arran 10'."}},
+                required=["query"],
+            ),
+            find_variant,
+        )
+
+        async def prepare_draft_order(args):
+            audit_tool(ctx, "prepare_draft_order", ORDER_ENTRY, allowed=True)
+            try:
+                result = await asyncio.to_thread(
+                    entry.prepare,
+                    ctx,
+                    {key: args.get(key) for key in ("company_id", "location_id", "customer_id")},
+                    args.get("lines"),
+                    args.get("note"),
+                )
+            except (entry.EntryError, shopify.ShopifyError) as exc:
+                return _error(str(exc))
+            state.proposal = result["proposal"]
+            state.text = result["text"]
+            reply = (
+                "The draft is priced and will be posted for approval with buttons. Do not repeat the "
+                "figures. Say nothing more than one short line."
+            )
+            if result["warnings"]:
+                reply += " Warnings shown to the user: " + " ".join(result["warnings"])
+            return {"content": [{"type": "text", "text": reply}]}
+
+        add(
+            "prepare_draft_order",
+            "Price a draft order for an existing customer and put it up for approval. Nothing is created "
+            "until a person with approval rights presses a button. Give EITHER company_id and location_id "
+            "(a company) OR customer_id (an individual), never both. Call this again with the FULL "
+            "corrected line list whenever the user asks for a change, which replaces the draft. Only use ids "
+            "that find_customer and find_variant returned. Discounts: discount_type is 'percent' (value is the "
+            "percentage), 'per_unit' (dollars off each unit) or 'line_total' (dollars off the whole line). "
+            "If the user's discount is unclear (for example '$50 off' with several units), ask which they "
+            "mean before calling.",
+            _schema(
+                {
+                    "company_id": {**STRING, "description": "A company, from find_customer. Use with location_id."},
+                    "location_id": {**STRING, "description": "The company location, from find_customer."},
+                    "customer_id": {**STRING, "description": "An individual customer, from find_customer. Not with company_id."},
+                    "lines": {
+                        "type": "array",
+                        "description": "Every product line on the order.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "variant_id": {**STRING, "description": "From find_variant."},
+                                "quantity": {**INTEGER, "description": "Whole units."},
+                                "discount_type": {"type": "string", "enum": ["percent", "per_unit", "line_total"]},
+                                "discount_value": {"type": "number"},
+                            },
+                            "required": ["variant_id", "quantity"],
+                        },
+                    },
+                    "note": {**STRING, "description": "Optional short note for the order (for example a PO reference)."},
+                },
+                required=["lines"],
+            ),
+            prepare_draft_order,
         )
 
     server = create_sdk_mcp_server(name=SERVER_NAME, version=VERSION, tools=tools)

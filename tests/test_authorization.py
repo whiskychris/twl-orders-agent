@@ -121,6 +121,96 @@ class CustomerVisibilityTests(unittest.TestCase):
         self.assertEqual(ctx.capabilities, frozenset({"customers"}))
 
 
+class OrderEntryAuthorizationTests(unittest.TestCase):
+    USERS = {
+        "twl:jimmy": {"name": "Jimmy", "capabilities": ["orders", "customers", "order_entry"]},
+        "twl:reader": {"name": "Reader", "capabilities": ["orders"]},
+        "twl:entry-only": {"name": "Entry", "capabilities": ["order_entry"]},
+    }
+
+    def resolve(self, who, conversation, channels=frozenset({"C0SALES"})):
+        with mock.patch.object(authorization, "get_authz_config", return_value=self.USERS), \
+             mock.patch.object(authorization, "get_order_entry_channels", return_value=channels):
+            return resolve_context(user(who), conversation, "r1")
+
+    def test_order_entry_works_in_a_dm(self):
+        ctx = self.resolve("twl:jimmy", {"id": "slack:D1:1.1", "source": "slack", "visibility": "dm"})
+        self.assertTrue(ctx.has("order_entry"))
+        self.assertTrue(ctx.has("customers"))
+
+    def test_order_entry_works_in_a_listed_channel_but_customers_are_still_withheld(self):
+        ctx = self.resolve("twl:jimmy", {"id": "slack:C0SALES:1.1", "source": "slack", "visibility": "channel"})
+        self.assertTrue(ctx.has("order_entry"))
+        self.assertFalse(ctx.has("customers"))
+        self.assertEqual(ctx.withheld, ("customers",))
+        self.assertEqual(ctx.channel_id, "C0SALES")
+        self.assertIn("prepare new orders", ctx.describe())
+
+    def test_order_entry_is_withheld_in_any_other_channel(self):
+        for conversation in (
+            {"id": "slack:C0OTHER:1.1", "source": "slack", "visibility": "channel"},
+            {"id": "garbage", "source": "slack", "visibility": "channel"},
+            {"source": "slack", "visibility": "channel"},   # no conversation id at all
+        ):
+            ctx = self.resolve("twl:jimmy", conversation)
+            self.assertFalse(ctx.has("order_entry"), conversation)
+            self.assertIn("order_entry", ctx.withheld)
+            self.assertIn("not available in this conversation", ctx.describe())
+
+    def test_missing_visibility_is_a_channel_and_the_allowlist_still_applies(self):
+        listed = self.resolve("twl:jimmy", {"id": "slack:C0SALES:1.1", "source": "slack"})
+        self.assertTrue(listed.has("order_entry"))
+        self.assertFalse(listed.has("customers"))       # treated as a channel, so customers stay withheld
+        unlisted = self.resolve("twl:jimmy", {"id": "slack:C0OTHER:1.1", "source": "slack"})
+        self.assertFalse(unlisted.has("order_entry"))
+
+    def test_no_allowlist_means_no_channels(self):
+        ctx = self.resolve("twl:jimmy", {"id": "slack:C0SALES:1.1", "source": "slack", "visibility": "channel"}, channels=frozenset())
+        self.assertFalse(ctx.has("order_entry"))
+
+    def test_channel_ids_are_compared_exactly(self):
+        for other in ("C0SALES2", "C0SALE", "c0sales-x", "D0SALES"):
+            ctx = self.resolve("twl:jimmy", {"id": f"slack:{other}:1.1", "source": "slack", "visibility": "channel"})
+            self.assertFalse(ctx.has("order_entry"), other)
+
+    def test_a_user_without_the_capability_never_gets_it_anywhere(self):
+        for conversation in (
+            {"id": "slack:D1:1.1", "source": "slack", "visibility": "dm"},
+            {"id": "slack:C0SALES:1.1", "source": "slack", "visibility": "channel"},
+        ):
+            self.assertFalse(self.resolve("twl:reader", conversation).has("order_entry"))
+
+    def test_a_user_with_only_order_entry_gets_nothing_in_an_unlisted_channel(self):
+        with self.assertRaises(AuthorizationError):
+            self.resolve("twl:entry-only", {"id": "slack:C0OTHER:1.1", "source": "slack", "visibility": "channel"})
+
+    def test_an_unreadable_channel_list_fails_closed_only_when_it_matters(self):
+        conversation = {"id": "slack:C0SALES:1.1", "source": "slack", "visibility": "channel"}
+        with mock.patch.object(authorization, "get_authz_config", return_value=self.USERS), \
+             mock.patch.object(authorization, "get_order_entry_channels", side_effect=AuthorizationUnavailable("x")):
+            with self.assertRaises(AuthorizationUnavailable):
+                resolve_context(user("twl:jimmy"), conversation, "r1")
+            # A user who never asked for order entry is unaffected, so reading orders keeps working.
+            self.assertTrue(resolve_context(user("twl:reader"), conversation, "r1").has("orders"))
+
+    def test_channel_of(self):
+        self.assertEqual(authorization.channel_of({"id": "slack:c0sales:1.2"}), "C0SALES")
+        for bad in (None, {}, {"id": ""}, {"id": "slack:C1"}, {"id": "web:C1:2"}):
+            self.assertEqual(authorization.channel_of(bad), "")
+
+    def test_the_channel_list_is_read_from_the_secret_and_cleaned(self):
+        authorization._cache.update(value=None, channels=None, loaded_at=0.0)
+        self.addCleanup(lambda: authorization._cache.update(value=None, channels=None, loaded_at=0.0))
+        secret = {"users": {"twl:a": {}}, "order_entry_channels": [" c0sales ", "", "C0OTHER", 5]}
+        with mock.patch.object(authorization, "read_secret_json", return_value=secret):
+            self.assertEqual(authorization.get_order_entry_channels(), frozenset({"C0SALES", "C0OTHER", "5"}))
+        authorization._cache.update(value=None, channels=None, loaded_at=0.0)
+        for bad in ({"users": {}}, {"users": {}, "order_entry_channels": "C0SALES"}):
+            with mock.patch.object(authorization, "read_secret_json", return_value=bad):
+                self.assertEqual(authorization.get_order_entry_channels(), frozenset())
+            authorization._cache.update(value=None, channels=None, loaded_at=0.0)
+
+
 class ToolAvailabilityTests(unittest.TestCase):
     def tools_for(self, who, visibility="dm"):
         with with_users():
@@ -157,11 +247,14 @@ class ToolAvailabilityTests(unittest.TestCase):
         import re
         properties = set(re.findall(r'"(\w+)": \{\*\*(?:STRING|INTEGER|BOOLEAN)', source))
         self.assertTrue(properties)
+        # Names that would read as an access switch. Lookup ids such as customer_id are fine: they pick
+        # WHICH customer, and what may be seen is still decided by the AuthContext, not by the argument.
+        forbidden_words = ("include", "capabilit", "permission", "allow", "bypass", "ignore", "override", "admin", "grant", "role")
+        forbidden_exact = {"customer", "customers", "inventory", "orders", "products", "order_entry", "approve", "approved", "confirm", "paid"}
         for name in properties:
-            self.assertNotIn("customer", name)
-            self.assertNotIn("inventory", name)
-            self.assertNotIn("capabilit", name)
-            self.assertNotIn("include", name)
+            self.assertNotIn(name, forbidden_exact)
+            for word in forbidden_words:
+                self.assertNotIn(word, name)
 
 
 class EndpointTests(unittest.TestCase):
@@ -173,7 +266,7 @@ class EndpointTests(unittest.TestCase):
         self.client = main.app.test_client()
         self.seen = []
 
-        async def fake_run_agent(prompt, ctx):
+        async def fake_run_agent(prompt, ctx, state=None):
             self.seen.append((prompt, ctx))
             return "stub answer"
 

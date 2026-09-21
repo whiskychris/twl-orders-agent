@@ -28,10 +28,19 @@ Project `the-rabbit-hole-509200`, region `australia-southeast1`.
      "twl:sam-example": {"name": "Sam", "capabilities": ["orders", "products"]}
    }}
    ```
-   Capabilities are `orders`, `products`, `inventory`, `customers`. Anyone missing from the list, or with an
-   empty list, is refused. Keys must match the `user_id` in `twl-gateway-config` exactly. Changes take
-   effect within five minutes (the list is cached that long per instance). Deploy the gateway change that sends
-   `user_id` and conversation visibility **before** this service, otherwise everyone is refused.
+   Capabilities are `orders`, `products`, `inventory`, `customers` and `order_entry`. Anyone missing from the
+   list, or with an empty list, is refused. Keys must match the `user_id` in `twl-gateway-config` exactly.
+   Changes take effect within five minutes (the list is cached that long per instance). Deploy the gateway
+   change that sends `user_id` and conversation visibility **before** this service, otherwise everyone is refused.
+10. **Order entry (optional).** To let people raise orders: give them the `order_entry` capability, add the
+    channels where it is allowed (the Slack channel id of #sales) to the same secret, and give the people who
+    may approve the gateway role `orders.approve`:
+    ```json
+    {"users": {...}, "order_entry_channels": ["C0123SALES"]}
+    ```
+    Also add the Shopify scopes `read_companies`, `read_draft_orders` and `write_draft_orders`
+    (`docs/shopify.md`). Deploy the gateway with named-choice proposals (`proposal-choices`) **before** this
+    service. Then follow "Verify on the first real order" in `docs/order-entry.md`.
 
 ## Try it
 In Slack: `orders: how many orders came in yesterday?`

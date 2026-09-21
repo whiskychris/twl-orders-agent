@@ -10,10 +10,18 @@ What that person may see comes from the secret `twl-orders-authz`, which this se
                                   "capabilities": ["orders", "products", "inventory", "customers"]}}}
 
 Capabilities:
-    orders     orders, order totals, order counts, fulfilment and tracking
-    products   products and variants, including selling prices
-    inventory  stock quantities and locations (also the stock figures on products)
-    customers  customer details: names, emails, phones, addresses, the order note, customer search
+    orders       orders, order totals, order counts, fulfilment and tracking
+    products     products and variants, including selling prices
+    inventory    stock quantities and locations (also the stock figures on products)
+    customers    customer details: names, emails, phones, addresses, the order note, customer search
+    order_entry  prepare a new order for an existing customer (company), for approval. Shows only the
+                 company and location name, never emails, phones or addresses. Available in a DM and in
+                 the channels listed under "order_entry_channels" in the secret (for example #sales):
+
+    {"users": {...}, "order_entry_channels": ["C0123SALES"]}
+
+Approving and creating the order is a separate step done in /v1/act (see entry.py), which checks the
+approver's role and this capability again.
 
 The rules:
 - Deny by default. Not listed means no access. If the permissions cannot be read, nothing is looked up.
@@ -31,11 +39,13 @@ from dataclasses import dataclass
 
 from .config import AUTHZ_SECRET, CACHE_SECONDS, USE_ROLE, read_secret_json
 
-CAPABILITIES = ("orders", "products", "inventory", "customers")
+CAPABILITIES = ("orders", "products", "inventory", "customers")  # reading data
+ORDER_ENTRY = "order_entry"  # preparing (and, with approval, creating) a new order
+ALL_CAPABILITIES = CAPABILITIES + (ORDER_ENTRY,)
 
 log = logging.getLogger("orders_agent.authz")
 
-_cache = {"value": None, "loaded_at": 0.0}
+_cache = {"value": None, "channels": None, "loaded_at": 0.0}
 
 
 class AuthorizationError(Exception):
@@ -55,6 +65,7 @@ class AuthContext:
     visibility: str  # "dm" or "channel"
     capabilities: frozenset
     withheld: tuple = ()  # capabilities the person has, but that are not shown in this conversation
+    channel_id: str = ""  # the Slack channel id (from the conversation id), for the allowlist
 
     def has(self, capability):
         return capability in self.capabilities
@@ -62,7 +73,8 @@ class AuthContext:
     def describe(self):
         """A short statement for the model, so it phrases answers well. It does NOT grant or
         limit anything. The tools and queries are what enforce access."""
-        can = ", ".join(sorted(self.capabilities)) or "nothing"
+        readable = [c for c in self.capabilities if c in CAPABILITIES]
+        can = ", ".join(sorted(readable)) or "nothing"
         cannot = [c for c in CAPABILITIES if c not in self.capabilities]
         where = "a direct message" if self.visibility == "dm" else "a shared channel"
         text = f"This conversation is {where}. Access for this user: can see {can}."
@@ -72,6 +84,13 @@ class AuthContext:
             text += (
                 " Customer details are withheld because this is a shared channel. They are"
                 " available in a direct message."
+            )
+        if self.has(ORDER_ENTRY):
+            text += " This user can prepare new orders for existing customers (companies or individuals)."
+        elif ORDER_ENTRY in self.withheld:
+            text += (
+                " Preparing new orders is not available in this conversation. It works in a direct"
+                " message and in the sales channel."
             )
         return text
 
@@ -89,16 +108,35 @@ def get_authz_config():
         users = config.get("users") if isinstance(config, dict) else None
         if not isinstance(users, dict):
             raise AuthorizationUnavailable(f"{AUTHZ_SECRET} has no 'users' map")
+        channels = config.get("order_entry_channels")
         _cache["value"] = users
+        _cache["channels"] = frozenset(
+            str(channel).strip().upper() for channel in channels if str(channel).strip()
+        ) if isinstance(channels, list) else frozenset()
         _cache["loaded_at"] = now
     return _cache["value"]
+
+
+def get_order_entry_channels():
+    """The Slack channel ids where order entry is allowed besides a DM (for example #sales).
+    Comes from the same secret. An absent or malformed list means no channels."""
+    get_authz_config()  # loads or refreshes the cache, and fails closed if unreadable
+    return _cache["channels"] or frozenset()
+
+
+def channel_of(conversation):
+    """The Slack channel id from a conversation, or ''. Ids look like slack:<channel>:<thread ts>."""
+    parts = str((conversation or {}).get("id") or "").split(":")
+    if len(parts) >= 3 and parts[0] == "slack":
+        return parts[1].strip().upper()
+    return ""
 
 
 def _granted(entry):
     raw = entry.get("capabilities") if isinstance(entry, dict) else None
     if not isinstance(raw, list):
         return frozenset()
-    return frozenset(str(item).strip().lower() for item in raw) & frozenset(CAPABILITIES)
+    return frozenset(str(item).strip().lower() for item in raw) & frozenset(ALL_CAPABILITIES)
 
 
 # --- audit --------------------------------------------------------------------------------
@@ -166,14 +204,21 @@ def resolve_context(user, conversation, request_id):
             "You haven't been given access to any order data yet. Ask an admin to add you."
         )
 
+    channel_id = channel_of(conversation)
     withheld = ()
     if "customers" in granted and visibility != "dm":
         granted = granted - {"customers"}
         withheld = ("customers",)
+    if ORDER_ENTRY in granted and visibility != "dm":
+        # Outside a DM, order entry works only in the channels on the allowlist (for example #sales).
+        if not channel_id or channel_id not in get_order_entry_channels():
+            granted = granted - {ORDER_ENTRY}
+            withheld = withheld + (ORDER_ENTRY,)
     if not granted:
-        audit("denied", request_id, user_id, source, visibility, reason="only_customers_in_channel")
+        audit("denied", request_id, user_id, source, visibility, reason="nothing_available_here")
         raise AuthorizationError(
-            "Customer details are only available in a direct message with me, not in a channel."
+            "That isn't available in a channel. Customer details and order entry work in a direct "
+            "message with me (and order entry also in the sales channel)."
         )
 
     name = str(entry.get("name") or user.get("name") or user_id)
@@ -185,6 +230,7 @@ def resolve_context(user, conversation, request_id):
         visibility=visibility,
         capabilities=granted,
         withheld=withheld,
+        channel_id=channel_id,
     )
     audit(
         "request",

@@ -1,0 +1,47 @@
+{
+  "_comment": "How sales say product names. Edit through a pull request. See docs/product-selection.md. What is typed is lower-cased, and 'year old', 'yo', 'single malt' and similar filler are dropped before any of this applies.",
+
+  "abbreviations": {
+    "_comment": "A short code that means one thing. Typed 'GA 10 CS' is read as 'glenallachie 10 cask strength'.",
+    "ar": "arran",
+    "ad": "ardnamurchan",
+    "ah": "ardnahoe",
+    "ga": "glenallachie",
+    "ba": "bunnahabhain",
+    "ld": "ledaig",
+    "ds": "deanston",
+    "twj": "whisky jury",
+    "cs": "cask strength"
+  },
+
+  "groups": {
+    "_comment": "A short code that means ANY ONE of several names. Typed 'DD arran 10' finds an Arran 10 from any of these bottlers.",
+    "dd": [
+      "decadent drams",
+      "decadent drinks",
+      "whiskyland",
+      "equinox solstice",
+      "old islay",
+      "old orkney"
+    ]
+  },
+
+  "aliases": [
+    {
+      "_comment": "For a product whose usual short name is not what its title reduces to. `say` is what people type. `title_has` says which product it means, by words in its title, so no product id is needed and a new batch just works. The product must be in the Popular Trade Products collection.",
+      "name": "Arran Sherry",
+      "say": ["arran sherry"],
+      "title_has": ["arran", "sherry", "cask"]
+    },
+    {
+      "name": "GlenAllachie 10 Cask Strength",
+      "say": ["glenallachie 10 cask strength"],
+      "title_has": ["glenallachie", "10", "cask", "strength"]
+    },
+    {
+      "name": "Remnant Golden Fleece",
+      "say": ["remnant golden fleece", "golden fleece"],
+      "title_has": ["remnant", "golden", "fleece"]
+    }
+  ]
+}
