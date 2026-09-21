@@ -263,6 +263,15 @@ def prepare(ctx, raw_target, raw_lines, note=None):
     variants = shop.get_variants([line["variant_id"] for line in lines])
     warnings = []
     stock_notes = False
+    if subject.get("contact_of"):
+        # A company contact ordered as an individual. It is allowed when asked for (typing their email and
+        # choosing the personal account), but the approver must see that the company's price list and terms
+        # do not apply.
+        companies = " and ".join(subject["contact_of"])
+        warnings.append(
+            f"This is {subject['name']}'s personal account, not the {companies} company account, so the company's "
+            "price list and payment terms do not apply."
+        )
     if not subject.get("shipping"):
         warnings.append("There is no delivery address on file for this customer, so none was added.")
     for number, (line, got) in enumerate(zip(lines, calc["lines"]), 1):

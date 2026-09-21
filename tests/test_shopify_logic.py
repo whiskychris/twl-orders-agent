@@ -9,6 +9,29 @@ from unittest import mock
 from orders_agent.sources import shopify
 
 
+class TransportErrorTests(unittest.TestCase):
+    def call_with_errors(self, errors):
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {"errors": errors}
+        with mock.patch.object(shopify, "get_shopify_config", return_value={"shop": "x.myshopify.com", "api_version": "2026-07", "access_token": "t"}), \
+             mock.patch.object(shopify.requests, "post", return_value=response):
+            with self.assertRaises(shopify.ShopifyError) as caught:
+                shopify.graphql("query { x }")
+        return str(caught.exception)
+
+    def test_the_same_error_reported_for_every_item_is_said_once(self):
+        message = self.call_with_errors([{"message": "Access denied for publication field."}] * 14)
+        self.assertEqual(message, "Shopify error: Access denied for publication field.")
+
+    def test_different_errors_are_all_kept_in_order(self):
+        message = self.call_with_errors([
+            {"message": "Access denied for publication field."},
+            {"message": "Access denied for publishedOnPublication field."},
+            {"message": "Access denied for publication field."},
+        ])
+        self.assertEqual(message, "Shopify error: Access denied for publication field.; Access denied for publishedOnPublication field.")
+
+
 class HelperTests(unittest.TestCase):
     def test_clamp(self):
         self.assertEqual(shopify.clamp(500, 1, 50, 20), 50)

@@ -471,6 +471,23 @@ class SearchTests(unittest.TestCase):
                 search.collection_products(CONFIG, "Popular Trade Products")
         self.assertNotIn("Popular Trade Products", search._quick_collection)
 
+    def test_a_missing_publications_permission_says_what_to_fix(self):
+        search.clear_cache()
+        self.addCleanup(search.clear_cache)
+        denied = ShopifyError("Shopify error: Access denied for publication field.")
+        with mock.patch.object(search, "graphql", side_effect=denied):
+            with self.assertRaises(ShopifyError) as caught:
+                search.resolve_sources(CONFIG)
+        message = str(caught.exception)
+        self.assertIn("read_publications", message)
+        self.assertIn("Nothing was guessed", message)
+        # Other Shopify errors are not dressed up as a permissions problem.
+        search.clear_cache()
+        with mock.patch.object(search, "graphql", side_effect=ShopifyError("Could not reach Shopify: timeout")):
+            with self.assertRaises(ShopifyError) as other:
+                search.resolve_sources(CONFIG)
+        self.assertNotIn("read_publications", str(other.exception))
+
     def test_the_pre_order_eta_is_read_from_the_metafield(self):
         base = {"id": "i", "title": "t", "handle": "h", "variants": {"nodes": []}}
         self.assertEqual(search._product({**base, "preOrderEta": {"value": " 2026-10-16 "}})["pre_order_eta"], "2026-10-16")

@@ -4,6 +4,7 @@ Read-only, fixed GraphQL validated against Shopify's Admin schema. One query ret
 status, vendor, tags, stock, variants, and whether it is in the priority collections and published to the
 priority catalogs (Our Brands, Trade Core, and so on, named in data/product_priority.json).
 
+Scopes needed: read_products, and read_publications (to see which catalogs a product is published to).
 The collection and catalog NAMES in the config are resolved to ids here, and cached for an hour. If a name
 can't be found (renamed or deleted in Shopify), this raises instead of ranking without it: silently
 dropping a tier would make the ranking wrong in a way nobody would notice.
@@ -98,7 +99,16 @@ def resolve_sources(config):
     wanted_collections = [tiers[n]["collection"] for n in ("1", "2", "3")]
     wanted_catalogs = [tiers[n]["catalog"] for n in ("1", "2", "3")]
     search = " OR ".join(f"title:'{title}'" for title in wanted_collections)
-    data = graphql(SOURCES, {"collections": search})
+    try:
+        data = graphql(SOURCES, {"collections": search})
+    except ShopifyError as exc:
+        if "Access denied" in str(exc):
+            raise ShopifyError(
+                "Product picking can't read TWL's catalogs, because the Shopify app hasn't been given the "
+                "read_publications permission. An admin needs to approve it in Shopify (Apps > TWL Orders Agent). "
+                f"Nothing was guessed. ({str(exc)[:200]})"
+            ) from exc
+        raise
 
     by_title = {}
     for node in _nodes(data.get("collections")):

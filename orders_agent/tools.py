@@ -12,6 +12,7 @@ and register them here the same way, under a capability. Keep them read-only.
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -23,6 +24,7 @@ from .sources import draft_orders, shopify
 
 SERVER_NAME = "orders_data"
 VERSION = "3.0.0"
+log = logging.getLogger("orders_agent.tools")
 
 try:
     SYDNEY = ZoneInfo("Australia/Sydney")
@@ -79,6 +81,9 @@ def build_server(ctx, state=None):
         try:
             return _data(await asyncio.to_thread(function, *args, **kwargs))
         except shopify.ShopifyError as exc:
+            # The model only sees a short error, and tells the user "a Shopify error". Log the real
+            # reason so it can be found (no customer data is ever in these messages).
+            log.warning("tool %s failed for %s: %s", tool_name, ctx.user_id, str(exc)[:500])
             return _error(str(exc))
 
     # --- time (no data) -------------------------------------------------------------------
@@ -313,8 +318,13 @@ def build_server(ctx, state=None):
             "(`companies`, each with company_id and its locations with location_id) and individual "
             "customers (`individual_customers`, each with customer_id). Orders for a company use its "
             "company_id and a location_id, and get the company's own prices. Orders for an individual use "
-            "the customer_id. If more than one matches, or a company has several locations, ask which one "
-            "is meant. Never guess. New customers can't be created.",
+            "the customer_id. To find someone by email address, pass the email as typed: the answer lists their "
+            "`accounts`, matched exactly (a personal account, and a company account if they are a contact at a "
+            "company). If both exist and the person did not say which, ask company or personal. Shopify's name "
+            "search is loose, so results include similar names: if exactly one "
+            "customer has exactly the name typed, `exact_match` says so (with the ids ready to use when it is a "
+            "company with one location). Use it and say which you chose. Otherwise, or if a company has several "
+            "locations, ask which is meant. Never guess. New customers can't be created.",
             _schema(
                 {
                     "query": {**STRING, "description": "Part of the customer or company name."},
@@ -361,6 +371,7 @@ def build_server(ctx, state=None):
                     args.get("note"),
                 )
             except (entry.EntryError, shopify.ShopifyError) as exc:
+                log.warning("prepare_draft_order refused for %s: %s", ctx.user_id, str(exc)[:500])
                 return _error(str(exc))
             state.proposal = result["proposal"]
             state.text = result["text"]

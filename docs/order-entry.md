@@ -39,9 +39,10 @@ shows only the company and location name.
 3. **Pricing is the customer's own.** For a company, the order is raised for the company, location and its main
    contact, so Shopify applies that company's price list and tax. For an individual it is raised for the
    customer at normal prices. Addresses go straight back to Shopify and never reach the model. A person who is
-   a contact at a company can't be ordered as an individual, because that would skip the company's prices and
-   terms: the search leaves them out and the order has to go through the company. A customer with no delivery
-   address on file gets a warning on the draft, not a refusal.
+   a contact at a company is left out of name searches as an individual, so nobody skips the company's prices
+   and terms by accident. They are offered by **email address** instead (see below), where the personal account
+   is an explicit choice and the draft warns about it. A customer with no delivery address on file gets a
+   warning on the draft, not a refusal.
 4. **Discounts are verified.** Shopify's preview must show the discount as intended (a per-unit dollar
    amount is sent as the whole-line amount, then checked). If it doesn't match, the draft is refused, never
    quietly created wrong.
@@ -55,6 +56,26 @@ shows only the company and location name.
 8. **A clear outcome.** A refusal (4xx) tells the gateway nothing was changed. An unexpected failure (5xx)
    makes the gateway say "the result is unknown, check Shopify before retrying".
 
+## Finding a customer by email address
+Sales can give an email instead of a name: `orders: new order for chris@thewhiskylist.com.au (company account): 6 x Arran 10`,
+or "... personal account". One email is one customer record, but that person may also be a contact at a company,
+so there can be two accounts to order on:
+- **Company account**: raised for the company and its location, with the company's price list and payment terms.
+- **Personal account**: raised for the customer at normal prices. The draft warns that the company's price list
+  and terms do not apply.
+
+If both exist and the person didn't say which, the agent asks. If the email is only a personal account it uses
+that. A company with several locations needs the location too.
+
+**The match is exact.** Shopify's own email search is loose: searching `chris@thewhiskylist.com.au` also returns
+`chris+1@`, `chris+2@` and so on, which are different people. The agent fetches the addresses only to compare them
+with what was typed, in code, and keeps the exact one. Lookalikes are ignored, and neither they nor any email
+address is ever shown or passed to the model. What comes back is the account type, the name of the person or
+company, and ids.
+
+**Privacy note:** an email lookup tells whoever has order entry that the address is a customer, their name and the
+companies they are a contact at. Order entry is limited to the people you named and to DMs and #sales, and names
+are what the drafts already show.
 ## Paid and unpaid
 "Paid" means the order was invoiced through Xero. This agent never touches Xero. It records the choice:
 - **Create (paid):** the draft is completed normally, so Shopify records the order as paid. The order note
@@ -71,7 +92,7 @@ is yours.
 
 ## Shopify setup
 The app needs these extra scopes (already listed in `shopify.app.toml`): `read_companies`,
-`read_draft_orders`, `write_draft_orders`. Update the app's scopes with the Shopify CLI
+`read_draft_orders`, `write_draft_orders` and `read_publications` (product picking reads catalog membership). Update the app's scopes with the Shopify CLI
 (`shopify app deploy`) and approve the new access in the store admin. Until then the tools fail with a
 clear message and nothing is created.
 
