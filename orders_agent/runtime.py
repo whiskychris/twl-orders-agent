@@ -12,9 +12,10 @@ MAX_TURNS = 10
 MAX_BUDGET_USD = 0.50
 
 
-async def run_agent(prompt, roles):
+async def run_agent(prompt, ctx):
+    """ctx is the caller's AuthContext. It decides which tools exist for this request."""
     token = get_anthropic_token()
-    server, tool_names = build_server(roles)
+    server, tool_names = build_server(ctx)
 
     options = ClaudeAgentOptions(
         model=MODEL,

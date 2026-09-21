@@ -17,14 +17,35 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(shopify.clamp(None, 1, 50, 20), 20)
         self.assertEqual(shopify.clamp("7", 1, 50, 20), 7)
 
-    def test_needs_customer_access(self):
-        self.assertTrue(shopify.needs_customer_access("email:jane@example.com"))
-        self.assertTrue(shopify.needs_customer_access("jane@example.com"))
-        self.assertTrue(shopify.needs_customer_access("last_name:Smith"))
-        self.assertTrue(shopify.needs_customer_access("customer_id:123"))
-        self.assertFalse(shopify.needs_customer_access("created_at:>=2026-09-21T00:00:00+10:00"))
-        self.assertFalse(shopify.needs_customer_access("fulfillment_status:unfulfilled sku:ABC123"))
-        self.assertFalse(shopify.needs_customer_access(""))
+    def test_structured_order_queries_are_allowed(self):
+        for query in (
+            "",
+            "name:1234",
+            "created_at:>=2026-09-21T00:00:00+10:00 created_at:<2026-09-22T00:00:00+10:00",
+            "fulfillment_status:unfulfilled sku:ABC123",
+            "financial_status:paid AND status:open",
+            "(tag:vip OR tag:rare) NOT status:cancelled",
+            'tag:"vip customers"',
+            "-tag:test",
+        ):
+            self.assertTrue(shopify.order_query_is_structured(query), query)
+
+    def test_anything_that_could_reveal_a_customer_is_refused(self):
+        for query in (
+            "smith",                       # free text also matches customer names
+            "jane@example.com",
+            "email:jane@example.com",
+            "phone:0400000000",
+            "customer:smith",
+            "customer_id:123",
+            "last_name:Smith",
+            "shipping_address:Sydney",
+            "name:1234 smith",             # one structured part does not excuse a free-text part
+            '"jane smith"',
+            "unknown_filter:x",
+            "created_at:",                 # an empty value is not a filter
+        ):
+            self.assertFalse(shopify.order_query_is_structured(query), query)
 
 
 class GuardTests(unittest.TestCase):
@@ -46,6 +67,53 @@ class GuardTests(unittest.TestCase):
             fake.return_value = {"orders": {"nodes": [], "pageInfo": {"hasNextPage": False}}}
             shopify.search_orders("status:open", include_customer=False)
             self.assertFalse(fake.call_args[0][1]["withCustomer"])
+
+    def test_free_text_order_search_refused_without_customer_access(self):
+        with mock.patch.object(shopify, "graphql") as fake:
+            with self.assertRaises(shopify.RestrictedError):
+                shopify.search_orders("smith", include_customer=False)
+            with self.assertRaises(shopify.RestrictedError):
+                shopify.summarise_orders("smith", include_customer=False)
+            fake.assert_not_called()
+
+    def test_order_note_and_customer_are_behind_the_same_flag(self):
+        # The order note often holds names and phone numbers, so it is only requested with the
+        # customer flag. These checks fail if someone moves a field out from behind it.
+        self.assertIn("note @include(if: $withCustomer)", shopify.ORDER_DETAIL)
+        self.assertIn("customer @include(if: $withCustomer)", shopify.ORDER_DETAIL)
+        self.assertIn("shippingAddress @include(if: $withCustomer)", shopify.ORDER_DETAIL)
+        self.assertIn("customer @include(if: $withCustomer)", shopify.SEARCH_ORDERS)
+
+    def test_get_order_omits_note_when_not_fetched(self):
+        node = {
+            "name": "#1001", "createdAt": "2026-09-21T01:00:00Z", "cancelledAt": None,
+            "displayFinancialStatus": "PAID", "displayFulfillmentStatus": "FULFILLED",
+            "currentTotalPriceSet": {"shopMoney": {"amount": "10.00", "currencyCode": "AUD"}},
+            "lineItems": {"nodes": []}, "fulfillments": [],
+        }
+        with mock.patch.object(shopify, "graphql", return_value={"orders": {"nodes": [node]}}) as fake:
+            order = shopify.get_order("1001", include_customer=False)
+        self.assertNotIn("note", order)
+        self.assertNotIn("customer", order)
+        self.assertFalse(fake.call_args[0][1]["withCustomer"])
+
+    def test_products_stock_only_with_inventory(self):
+        node = {
+            "title": "Ardnahoe 10", "handle": "a", "status": "ACTIVE", "vendor": "V",
+            "productType": "Whisky", "tracksInventory": True, "totalInventory": 12,
+            "variants": {"nodes": [{"sku": "AH10", "title": "700ml", "price": "99.00", "inventoryQuantity": 12}]},
+        }
+        page = {"products": {"nodes": [node], "pageInfo": {"hasNextPage": False}}}
+        with mock.patch.object(shopify, "graphql", return_value=page) as fake:
+            without = shopify.search_products("title:*ardnahoe*", include_inventory=False)
+            self.assertFalse(fake.call_args[0][1]["withInventory"])
+            with_stock = shopify.search_products("title:*ardnahoe*", include_inventory=True)
+            self.assertTrue(fake.call_args[0][1]["withInventory"])
+        self.assertNotIn("total_inventory", without["products"][0])
+        self.assertNotIn("inventory_quantity", without["products"][0]["variants"][0])
+        self.assertEqual(with_stock["products"][0]["total_inventory"], 12)
+        self.assertEqual(with_stock["products"][0]["variants"][0]["inventory_quantity"], 12)
+        self.assertIn("@include(if: $withInventory)", shopify.SEARCH_PRODUCTS)
 
 
 class SummariseTests(unittest.TestCase):

@@ -1,8 +1,8 @@
 """Configuration and roles for the orders agent.
 
-Roles arrive from the gateway on every request (user.roles). This service never sees Slack.
-    orders.use        may ask about orders, products and inventory
-    orders.customers  may also see customer personal data (names, emails, phones, addresses)
+The gateway sends the caller's identity and its application role on every request. This service
+never sees Slack. `orders.use` is the gateway's decision (may this person use the assistant).
+What each person may SEE is decided here, in authorization.py, from the secret twl-orders-authz.
 """
 
 import base64
@@ -17,8 +17,8 @@ PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "the-rabbit-hole-509200")
 SHOPIFY_SECRET = os.environ.get("SHOPIFY_CONFIG_SECRET", "twl-shopify-config")
 CACHE_SECONDS = 300
 
-USE_ROLE = "orders.use"
-CUSTOMERS_ROLE = "orders.customers"
+USE_ROLE = "orders.use"  # the gateway's role: may this person use the orders assistant at all
+AUTHZ_SECRET = os.environ.get("ORDERS_AUTHZ_SECRET", "twl-orders-authz")  # who sees what
 
 _cache = {"value": None, "loaded_at": 0.0}
 
