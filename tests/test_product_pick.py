@@ -11,10 +11,11 @@ CONFIG = pick.load_config()
 NO_FLAGS = dict(our_brands=False, ib_collection=False, special_collection=False, trade_core=False, trade_ibs=False, trade_special=False)
 
 
-def product(title, handle, tags=(), stock=10, vendor="twl3.0", status="ACTIVE", variants=None, **flags):
+def product(title, handle, tags=(), stock=10, vendor="twl3.0", status="ACTIVE", variants=None, pid=None, eta=None, **flags):
     return {
-        "id": f"gid://shopify/Product/{abs(hash(handle)) % 10**9}",
+        "id": pid or f"gid://shopify/Product/{abs(hash(handle)) % 10**9}",
         "title": title, "handle": handle, "status": status, "vendor": vendor, "tags": list(tags),
+        "pre_order_eta": eta,
         "flags": {**NO_FLAGS, **flags},
         "variants": variants if variants is not None else [
             {"id": f"gid://shopify/ProductVariant/{abs(hash(handle)) % 10**9}", "title": "The Whisky List Shop", "sku": "uuid uuid", "stock": stock}
@@ -34,7 +35,11 @@ SAMPLE_ARRAN10 = product("[SAMPLE] Arran 10 Year Old Single Malt Scotch Whisky",
 GIFT_PACK = product("Arran 10 Year Old with 2 Glasses Gift Pack Single Malt Scotch Whisky", "arran-gift", ["brand_Arran", "TWL Brand"], 30, trade_core=True)
 GIFT_CARD = product("Whisky Gift Card", "gift-card", ["partnerStore_The Whisky List Shop"], 548)
 BOTTLE_SPLIT = product("Rewards Members Exclusive Private Cask Bottle Split - Bunnahabhain Staoisha", "split", ["partnerStore_The Whisky List Shop"], 13)
-GA12 = product("GlenAllachie 12 Year Old Single Malt Scotch Whisky [PRE-ORDER]", "glenallachie-12-year-old-single-malt-scotch-whisky", ["brand_GlenAllachie", "TWL Brand"], 217, our_brands=True)
+GA12 = product("GlenAllachie 12 Year Old Single Malt Scotch Whisky [PRE-ORDER]", "glenallachie-12-year-old-single-malt-scotch-whisky", ["brand_GlenAllachie", "TWL Brand", "pre-order"], 217, our_brands=True, eta="2026-10-16")
+GA10CS_B13 = product("GlenAllachie 10 Year Old Cask Strength Batch 13 Single Malt Scotch Whisky [PRE-ORDER]", "glenallachie-10-year-old-cask-strength-batch-13-single-malt-scotch-whisky-pre-order",
+                     ["brand_GlenAllachie", "TWL Brand", "pre-order", "abv_60"], 82, pid="gid://shopify/Product/8436830666826", eta="2026-10-16")
+# In a TWL range (Our Brands) but NOT tagged TWL Brand, so with no stock it is not offered.
+OOS_NON_BRAND = product("Ardnamurchan AD 10 Year Old Single Malt Scotch Whisky", "ardnamurchan-ad", ["brand_Ardnamurchan"], 0, our_brands=True)
 GA12_PX = product("GlenAllachie 12 Year Old Pedro Ximenez Wood Single Malt Scotch Whisky", "ga12-px", ["brand_GlenAllachie", "TWL Brand"], 9, trade_core=True)
 GA10CS_B6 = product("GlenAllachie 10 Year Old Cask Strength Batch 6 Single Malt Scotch Whisky", "ga10cs-b6", ["brand_GlenAllachie", "TWL Brand"], 0, trade_core=True)
 GA10CS_B7 = product("GlenAllachie 10 Year Old Cask Strength Batch 7 Single Malt Scotch Whisky", "ga10cs-b7", ["brand_GlenAllachie", "TWL Brand"], 0, trade_core=True)
@@ -42,19 +47,20 @@ REMNANT = product("Remnant Whisky Co. Golden Fleece Australian Single Malt Whisk
 INFINITE = product("Ardnahoe Infinite Loch Single Malt Scotch Whisky", "ardnahoe-infinite-loch-single-malt-scotch-whisky", ["brand_Ardnahoe", "TWL Brand"], 8, our_brands=True)
 BHOLSA = product("Ardnahoe Bholsa Single Malt Scotch Whisky", "ardnahoe-bholsa-single-malt-scotch-whisky", ["brand_Ardnahoe", "TWL Brand"], 24, our_brands=True)
 NOT_IN_RANGE = product("Random Bourbon 8 Year Old", "random-bourbon", [], 50)
+TIER4_OOS = product("Random Rum 5 Year Old", "tier4-rum", ["partnerStore_The Whisky List Shop"], 0)
 TIER4 = product("Random Bourbon 12 Year Old", "tier4-bourbon", ["partnerStore_The Whisky List Shop"], 20)
 SPECIAL = product("Special Edition Rye 15 Year Old", "special-rye", [], 5, trade_special=True)
 IB_OTHER = product("Some Bottler Rye 15 Year Old", "ib-rye", ["TWL IB"], 5)
 OWN_OTHER = product("Own Brand Rye 15 Year Old", "own-rye", ["TWL Brand"], 5)
 
-BY_HANDLE = {p["handle"]: p for p in (ARRAN10, BARLEY, ARRAN_SHERRY, GA12, REMNANT, INFINITE, BHOLSA)}
+BY_HANDLE = {p["handle"]: p for p in (ARRAN10, BARLEY, ARRAN_SHERRY, GA12, GA10CS_B13, REMNANT, INFINITE, BHOLSA)}
 
 
 def quick(*extra_products, **override):
     """What the quick order entries point at, by entry name."""
     lookup = {
         "Arran 10": [ARRAN10], "Arran Sherry": [ARRAN_SHERRY], "GlenAllachie 12": [GA12],
-        "GlenAllachie 10 Cask Strength": [GA10CS_B6, GA10CS_B7], "Remnant Golden Fleece": [REMNANT],
+        "GlenAllachie 10 Cask Strength": [GA10CS_B13], "Remnant Golden Fleece": [REMNANT],
         "Ardnahoe Infinite Loch": [INFINITE], "Ardnahoe Bholsa": [BHOLSA],
     }
     lookup.update(override)
@@ -117,14 +123,36 @@ class AssessTests(unittest.TestCase):
     def test_what_is_never_offered(self):
         expected = {
             "sample": SAMPLE_ARRAN10, "gift": GIFT_PACK, "bottle_split": BOTTLE_SPLIT,
-            "no_stock": BARLEY, "not_in_a_twl_range": NOT_IN_RANGE,
+            "no_stock": OOS_NON_BRAND, "not_in_a_twl_range": NOT_IN_RANGE,
         }
         for reason, item in expected.items():
             self.assertEqual(self.assess(item)["exclusion"], reason, reason)
         self.assertEqual(self.assess(GIFT_CARD)["exclusion"], "gift")            # in stock (548), but a gift card
-        self.assertEqual(self.assess(REMNANT)["exclusion"], "no_stock")           # oversold: -19 is no stock
         self.assertEqual(self.assess(product("x", "x", ["TWL Brand"], status="DRAFT"))["exclusion"], "inactive")
         self.assertEqual(self.assess(product("x", "x", ["TWL Brand"], status="ARCHIVED"))["exclusion"], "inactive")
+
+    def test_twl_brand_products_are_offered_out_of_stock_but_only_those(self):
+        for out_of_stock in (BARLEY, REMNANT):                     # zero stock, and oversold (-19)
+            result = self.assess(out_of_stock)
+            self.assertIsNone(result["exclusion"], out_of_stock["title"])
+            self.assertEqual(len(result["variants"]), 1)
+            self.assertLessEqual(result["variants"][0]["stock"], 0)
+        # The same with no stock is NOT offered when it isn't tagged TWL Brand, whatever range it is in.
+        for other in (OOS_NON_BRAND, product("x", "x", ["TWL IB"], 0), product("x", "x", [], 0, trade_special=True), TIER4_OOS):
+            self.assertEqual(self.assess(other)["exclusion"], "no_stock", other["title"])
+
+    def test_an_in_stock_variant_hides_out_of_stock_ones_even_for_twl_brand(self):
+        mixed = product("Mixed", "mixed", ["TWL Brand"], variants=[
+            {"id": "a", "title": "700ml", "sku": "", "stock": 5}, {"id": "b", "title": "1L", "sku": "", "stock": 0}])
+        self.assertEqual([v["id"] for v in self.assess(mixed)["variants"]], ["a"])
+
+    def test_pre_orders_are_recognised_by_tag_or_title_and_carry_the_eta(self):
+        result = self.assess(GA12)
+        self.assertTrue(result["pre_order"])
+        self.assertEqual(result["eta"], "2026-10-16")
+        self.assertTrue(self.assess(product("Thing [PRE-ORDER]", "t", ["TWL Brand"]))["pre_order"])
+        self.assertTrue(self.assess(product("Thing", "t", ["TWL Brand", "pre-order"]))["pre_order"])
+        self.assertFalse(self.assess(ARRAN10)["pre_order"])
 
     def test_a_sample_is_caught_by_vendor_even_without_the_title_tag(self):
         self.assertEqual(self.assess(product("Arran 10", "s", ["TWL Brand"], vendor="Sample"))["exclusion"], "sample")
@@ -185,23 +213,39 @@ class QuickOrderTests(unittest.TestCase):
     def test_glenallachie_12_is_used_and_the_pre_order_is_flagged(self):
         result = decide("GlenAllachie 12", [GA12, GA12_PX])
         self.assertEqual(result["decision"], "use")
-        self.assertEqual(result["choice"]["warning"], "This is a pre-order product.")
+        self.assertTrue(result["choice"]["pre_order"])
+        self.assertEqual(result["choice"]["eta"], "16 Oct 2026")
+        self.assertEqual(result["choice"]["warnings"], ["Pre-order product, ETA 16 Oct 2026."])
+        self.assertNotIn("out_of_stock", result["choice"])
         for typed in ("glen allachie 12", "GA12", "ga 12", "glenallachie 12yo"):
             self.assertEqual(decide(typed, [GA12, GA12_PX])["decision"], "use", typed)
 
-    def test_an_out_of_stock_quick_product_is_reported_and_no_substitute_is_chosen(self):
-        for query, entry, pool in (
-            ("GlenAllachie 10 Cask Strength", "GlenAllachie 10 Cask Strength", []),
-            ("Remnant Golden Fleece", "Remnant Golden Fleece", []),
-            ("golden fleece", "Remnant Golden Fleece", []),
-        ):
-            result = decide(query, pool)
-            self.assertEqual(result["decision"], "none", query)
-            self.assertIn(f"{entry} is out of stock.", result["unavailable"])
-            self.assertNotIn("choice", result)
+    def test_glenallachie_10_cask_strength_is_the_pinned_pre_order_batch(self):
+        for typed in ("GlenAllachie 10 Cask Strength", "glenallachie 10 cs", "GA 10 CS", "glen allachie 10 cask strength"):
+            result = decide(typed, [])
+            self.assertEqual(result["decision"], "use", typed)
+            self.assertEqual(result["choice"]["name"], GA10CS_B13["title"])
+            self.assertEqual(result["choice"]["eta"], "16 Oct 2026")
+            self.assertNotIn("out_of_stock", result["choice"])          # 82 allocated, so in stock
 
-    def test_alternatives_are_offered_but_never_chosen_when_the_named_one_is_out_of_stock(self):
-        result = decide("GlenAllachie 12", [GA12_PX], quick(**{"GlenAllachie 12": [product(GA12["title"], GA12["handle"], GA12["tags"], 0, our_brands=True)]}))
+    def test_an_out_of_stock_twl_brand_quick_product_is_offered_and_flagged(self):
+        for typed in ("Remnant Golden Fleece", "golden fleece"):
+            result = decide(typed, [])
+            self.assertEqual(result["decision"], "use", typed)
+            self.assertEqual(result["choice"]["name"], REMNANT["title"])
+            self.assertTrue(result["choice"]["out_of_stock"])
+            self.assertIn("Out of stock", result["choice"]["warnings"][0])
+            self.assertEqual(result["unavailable"], [])
+
+    def test_a_non_twl_brand_out_of_stock_quick_product_is_reported_and_not_replaced(self):
+        entry_products = quick(**{"Ardnahoe Bholsa": [OOS_NON_BRAND]})
+        result = decide("Ardnahoe Bholsa", [], entry_products)
+        self.assertEqual(result["decision"], "none")
+        self.assertIn("Ardnahoe Bholsa is out of stock.", result["unavailable"])
+        self.assertNotIn("choice", result)
+
+    def test_alternatives_are_offered_but_never_chosen_when_the_named_one_is_unavailable(self):
+        result = decide("GlenAllachie 12", [GA12_PX], quick(**{"GlenAllachie 12": [OOS_NON_BRAND]}))
         self.assertEqual(result["decision"], "ask")
         self.assertEqual(names(result), [GA12_PX["title"]])
         self.assertIn("GlenAllachie 12 is out of stock.", result["unavailable"])
@@ -212,20 +256,59 @@ class QuickOrderTests(unittest.TestCase):
         self.assertEqual(result["decision"], "none")
         self.assertTrue(any("can't find it in Shopify" in line for line in result["unavailable"]))
 
-    def test_a_batch_that_rotates_is_found_by_pattern(self):
-        in_stock = product(GA10CS_B7["title"], "ga10cs-b7", ["brand_GlenAllachie", "TWL Brand"], 30, trade_core=True)
-        result = decide("GlenAllachie 10 Cask Strength", [], quick(**{"GlenAllachie 10 Cask Strength": [GA10CS_B6, in_stock]}))
-        self.assertEqual(result["decision"], "use")
-        self.assertIn("Batch 7", result["choice"]["name"])
-        two = product(GA10CS_B6["title"], "ga10cs-b6", ["brand_GlenAllachie", "TWL Brand"], 4, trade_core=True)
-        self.assertEqual(decide("GlenAllachie 10 Cask Strength", [], quick(**{"GlenAllachie 10 Cask Strength": [two, in_stock]}))["decision"], "ask")
+    def test_older_out_of_stock_batches_do_not_muddy_the_pinned_choice(self):
+        # Batches 6 and 7 are tagged TWL Brand and out of stock, so they are now offered as options for a
+        # loose search, but the quick order entry names Batch 13 and that is what "GlenAllachie 10 Cask
+        # Strength" gives.
+        result = decide("GlenAllachie 10 Cask Strength", [GA10CS_B6, GA10CS_B7, GA10CS_B13])
+        self.assertEqual((result["decision"], result["choice"]["name"]), ("use", GA10CS_B13["title"]))
+        loose = decide("glenallachie cask strength", [GA10CS_B6, GA10CS_B7, GA10CS_B13])
+        self.assertEqual(loose["decision"], "ask")
+        self.assertEqual(names(loose)[0], GA10CS_B13["title"])                 # the in-stock, pinned one first
+        self.assertTrue(all(o.get("out_of_stock") for o in loose["options"][1:]))
 
 
 class RankingTests(unittest.TestCase):
     def test_samples_gift_packs_splits_and_cards_are_never_options(self):
-        pool = [SAMPLE_ARRAN10, GIFT_PACK, GIFT_CARD, BOTTLE_SPLIT, NOT_IN_RANGE, BARLEY]
-        for typed in ("arran 10", "gift", "split", "bourbon", "sample arran"):
+        pool = [SAMPLE_ARRAN10, GIFT_PACK, GIFT_CARD, BOTTLE_SPLIT, NOT_IN_RANGE, OOS_NON_BRAND, TIER4_OOS]
+        for typed in ("arran 10", "gift", "split", "bourbon", "sample arran", "ardnamurchan", "rum"):
             self.assertEqual(decide(typed, pool, {})["decision"], "none", typed)
+
+    def test_a_lone_out_of_stock_twl_brand_product_is_offered_and_flagged(self):
+        result = decide("arran barley", [BARLEY], {})
+        self.assertEqual(result["decision"], "use")
+        self.assertTrue(result["choice"]["out_of_stock"])
+
+    def test_in_stock_options_come_before_out_of_stock_ones(self):
+        result = decide("arran", [BARLEY, ARRAN_IB, ARRAN14], {})
+        self.assertEqual(result["decision"], "ask")
+        self.assertEqual(names(result), [ARRAN14["title"], ARRAN_IB["title"], BARLEY["title"]])
+        self.assertTrue(result["options"][2]["out_of_stock"])
+        self.assertNotIn("out_of_stock", result["options"][0])
+
+    def test_being_in_stock_does_not_make_a_winner(self):
+        # "Arran 14" could mean the out-of-stock core Arran 14 or the in-stock Palo Cortado. Ask, don't pick.
+        core14 = product("Arran 14 Year Old Single Malt Scotch Whisky", "arran-14", ["brand_Arran", "TWL Brand"], 0, trade_core=True)
+        result = decide("arran 14", [core14, ARRAN14], {})
+        self.assertEqual(result["decision"], "ask")
+        self.assertEqual(names(result), [ARRAN14["title"], core14["title"]])   # in stock listed first, both offered
+
+    def test_a_pre_order_without_an_eta_says_so(self):
+        no_eta = product("New Thing [PRE-ORDER]", "nt", ["TWL Brand", "pre-order"], 10)
+        self.assertEqual(decide("new thing", [no_eta], {})["choice"]["warnings"], ["Pre-order product, no ETA set."])
+
+    def test_an_out_of_stock_pre_order_carries_both_flags(self):
+        both = product("Late Thing [PRE-ORDER]", "lt", ["TWL Brand", "pre-order"], 0, eta="2026-12-01")
+        option = decide("late thing", [both], {})["choice"]
+        self.assertTrue(option["out_of_stock"] and option["pre_order"])
+        self.assertEqual(option["eta"], "1 Dec 2026")
+        self.assertEqual(len(option["warnings"]), 2)
+
+    def test_eta_dates_read_the_way_people_say_them(self):
+        self.assertEqual(pick.format_eta("2026-10-16"), "16 Oct 2026")
+        self.assertEqual(pick.format_eta("2026-01-05"), "5 Jan 2026")
+        self.assertEqual(pick.format_eta("2026-10-16T00:00:00Z"), "16 Oct 2026")
+        self.assertEqual(pick.format_eta("TBC"), "TBC")
 
     def test_ranges_order_the_options(self):
         pool = [TIER4, IB_OTHER, SPECIAL, OWN_OTHER]
@@ -314,6 +397,28 @@ class SearchTests(unittest.TestCase):
     def test_handles_are_cleaned(self):
         self.assertEqual(search.handles_query(["arran-10", "Bad Handle; drop"]), "handle:arran-10 OR handle:badhandledrop")
 
+    def test_product_ids_are_reduced_to_numbers(self):
+        self.assertEqual(
+            search.ids_query(["gid://shopify/Product/8436830666826", "123", "x; drop 9"]),
+            "id:8436830666826 OR id:123 OR id:9",
+        )
+
+    def test_the_out_of_stock_search_is_limited_to_the_configured_tags(self):
+        query = search.out_of_stock_query(["arran"], ["TWL Brand"])
+        self.assertEqual(query, "title:*arran* AND status:active AND inventory_total:<=0 AND (tag:'TWL Brand')")
+        two = search.out_of_stock_query(["arran"], ["A'B", "C"])
+        self.assertEqual(two.count("tag:"), 2)
+        self.assertNotIn("A'B", two)       # a quote can't break out of the tag filter
+        with self.assertRaises(ShopifyError):
+            search.out_of_stock_query(["arran"], [])
+
+    def test_the_pre_order_eta_is_read_from_the_metafield(self):
+        base = {"id": "i", "title": "t", "handle": "h", "variants": {"nodes": []}}
+        self.assertEqual(search._product({**base, "preOrderEta": {"value": " 2026-10-16 "}})["pre_order_eta"], "2026-10-16")
+        self.assertIsNone(search._product(base)["pre_order_eta"])
+        self.assertIsNone(search._product({**base, "preOrderEta": None})["pre_order_eta"])
+        self.assertIsNone(search._product({**base, "preOrderEta": {"value": ""}})["pre_order_eta"])
+
     def test_sources_are_resolved_by_name_cached_and_a_missing_one_refuses(self):
         search.clear_cache()
         self.addCleanup(search.clear_cache)
@@ -343,15 +448,19 @@ class SearchTests(unittest.TestCase):
 class FindForOrderTests(unittest.TestCase):
     """The orchestration: which Shopify searches are made, with search faked."""
 
-    def run_find(self, query, pool, by_handle=None, everything=None, include_inventory=False):
+    def run_find(self, query, pool, by_handle=None, everything=None, oos_pool=None, include_inventory=False):
         calls = []
+        catalog = by_handle if by_handle is not None else BY_HANDLE
 
         def fake_search(config, shopify_query, limit=50):
             calls.append(shopify_query)
-            if shopify_query.startswith("handle:"):
-                return [p for p in (by_handle if by_handle is not None else BY_HANDLE).values() if f"handle:{p['handle']}" in shopify_query]
+            if "title:*" not in shopify_query:      # a quick order entry, looked up by handle or by product id
+                return [p for p in catalog.values()
+                        if f"handle:{p['handle']}" in shopify_query or f"id:{p['id'].rsplit('/', 1)[-1]} " in shopify_query + " "]
             if "inventory_total:>0" in shopify_query:
                 return pool
+            if "inventory_total:<=0" in shopify_query:
+                return oos_pool if oos_pool is not None else []
             return everything if everything is not None else []
 
         with mock.patch.object(search, "search", side_effect=fake_search):
@@ -365,16 +474,28 @@ class FindForOrderTests(unittest.TestCase):
         self.assertTrue(any("title:*arran* AND title:*10*" in call and "inventory_total:>0" in call for call in calls))
 
     def test_an_unknown_product_says_nothing_matched_and_why(self):
-        oos = [product("Macallan 18 Year Old", "mac18", ["TWL Brand"], 0, trade_core=True)]
+        # In a TWL range but not tagged TWL Brand, so with no stock it is not offered, and the reason is given.
+        oos = [product("Macallan 18 Year Old", "mac18", [], 0, trade_core=True)]
         result, calls = self.run_find("Macallan 18", [], everything=oos)
         self.assertEqual(result["decision"], "none")
         self.assertTrue(any("Matched but out of stock: Macallan 18 Year Old" in line for line in result["unavailable"]))
 
-    def test_a_pattern_entry_searches_by_name_and_filters_by_title(self):
-        by_handle = dict(BY_HANDLE)
-        result, calls = self.run_find("glenallachie 10 cs", [], everything=[GA10CS_B6, GA10CS_B7, GA12])
-        self.assertEqual(result["decision"], "none")
-        self.assertIn("GlenAllachie 10 Cask Strength is out of stock.", result["unavailable"])
+    def test_a_pinned_product_id_is_looked_up_by_id(self):
+        result, calls = self.run_find("glenallachie 10 cs", [])
+        self.assertEqual(result["decision"], "use")
+        self.assertEqual(result["choice"]["name"], GA10CS_B13["title"])
+        self.assertEqual(result["choice"]["eta"], "16 Oct 2026")
+        self.assertIn("id:8436830666826", calls)
+
+    def test_out_of_stock_twl_brand_products_are_searched_for_separately(self):
+        result, calls = self.run_find("arran barley", [], oos_pool=[BARLEY])
+        self.assertEqual(result["decision"], "use")
+        self.assertTrue(result["choice"]["out_of_stock"])
+        self.assertTrue(any("inventory_total:<=0" in c and "tag:'TWL Brand'" in c for c in calls))
+
+    def test_the_two_searches_are_merged_without_duplicates(self):
+        result, _ = self.run_find("arran", [ARRAN14, BARLEY], oos_pool=[BARLEY])
+        self.assertEqual(len([o for o in result["options"] if o["name"] == BARLEY["title"]]), 1)
 
     def test_a_full_pool_is_flagged_as_possibly_incomplete(self):
         pool = [product(f"Widget {n}", f"w{n}", ["TWL Brand"], 5) for n in range(pick.POOL_SIZE)]
@@ -394,9 +515,12 @@ class ConfigTests(unittest.TestCase):
             "Arran 10", "Arran Sherry", "GlenAllachie 12", "GlenAllachie 10 Cask Strength",
             "Remnant Golden Fleece", "Ardnahoe Infinite Loch", "Ardnahoe Bholsa"])
         self.assertEqual(CONFIG["priority_brands"], ["Arran", "GlenAllachie", "Ardnahoe", "Ardnamurchan"])
+        self.assertEqual(CONFIG["_oos_tags"], {"twl brand"})
+        ga10 = next(e for e in CONFIG["quick_order"] if e["name"] == "GlenAllachie 10 Cask Strength")
+        self.assertEqual(ga10["product_ids"], ["gid://shopify/Product/8436830666826"])
         for entry in CONFIG["quick_order"]:
             self.assertTrue(entry["_aliases"], entry["name"])
-            self.assertTrue(entry.get("handles") or entry.get("title_pattern"), entry["name"])
+            self.assertTrue(entry.get("handles") or entry.get("product_ids") or entry.get("title_pattern"), entry["name"])
             # The entry's own name is always one of its aliases, so typing it exactly always works.
             self.assertIn(frozenset(pick.tokens(entry["name"])), entry["_aliases"], entry["name"])
 

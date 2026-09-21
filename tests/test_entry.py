@@ -212,14 +212,43 @@ class PrepareTests(unittest.TestCase):
         )
         self.assertIn("only 2 in stock", result["text"])
 
-    def test_stock_is_not_disclosed_without_the_inventory_capability(self):
-        with mock.patch.object(entry.shop, "get_variants", return_value={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": None}}) as get_variants, \
-             mock.patch.object(entry.shop, "get_location", return_value=location()), \
-             mock.patch.object(entry.shop, "calculate", side_effect=lambda i: priced([{"variant_id": VARIANT_A, "quantity": 6}])), \
-             mock.patch.object(entry.shop, "default_unpaid_terms", return_value=TERMS):
-            result = entry.prepare(ctx(("orders", "order_entry")), {"company_id": COMPANY, "location_id": LOCATION}, raw((VARIANT_A, 6)))
-        self.assertFalse(get_variants.call_args.kwargs["include_inventory"])
-        self.assertNotIn("stock", result["text"])
+    def test_stock_counts_are_not_disclosed_without_the_inventory_capability(self):
+        result = self.prepare(variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": 2}})
+        self.assertIn("there may not be enough stock for 6", result["text"])
+        self.assertNotIn("only 2", result["text"])
+        self.assertNotIn(" 2 ", result["text"].split("⚠️")[1].split("\n")[0])
+
+    def test_an_out_of_stock_line_is_flagged_for_everyone_and_suggests_unpaid(self):
+        for capabilities in (("orders", "order_entry"), ("orders", "order_entry", "inventory")):
+            result = self.prepare(capabilities, variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": 0}})
+            self.assertIn("Product 1 is out of stock.", result["text"], capabilities)
+            self.assertIn("usually created as unpaid", result["text"])
+            self.assertIn("Line 1", result["warnings"][0])
+
+    def test_an_oversold_line_counts_as_out_of_stock(self):
+        result = self.prepare(variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": -19}})
+        self.assertIn("is out of stock", result["text"])
+        self.assertNotIn("-19", result["text"])
+
+    def test_a_pre_order_line_shows_its_eta(self):
+        result = self.prepare(variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": 82, "pre_order": True, "eta": "2026-10-16"}})
+        self.assertIn("is a pre-order product, ETA 16 Oct 2026.", result["text"])
+        self.assertIn("usually created as unpaid", result["text"])
+
+    def test_a_pre_order_with_no_eta_says_so(self):
+        result = self.prepare(variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": 82, "pre_order": True, "eta": None}})
+        self.assertIn("pre-order product, no ETA set.", result["text"])
+
+    def test_plenty_of_stock_and_no_pre_order_means_no_warning_and_no_tip(self):
+        result = self.prepare(variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": 500}})
+        self.assertEqual(result["warnings"], [])
+        self.assertNotIn("usually created as unpaid", result["text"])
+        self.assertNotIn("⚠️", result["text"])
+
+    def test_flags_never_block_the_draft(self):
+        result = self.prepare(variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": 0, "pre_order": True, "eta": "2026-10-16"}})
+        self.assertEqual(result["proposal"]["kind"], "draft_order")
+        self.assertEqual(len(result["warnings"]), 2)
 
     def test_the_location_terms_are_used_else_the_default(self):
         net30 = {"id": "gid://shopify/PaymentTermsTemplate/4", "name": "Net 30"}

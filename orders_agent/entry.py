@@ -27,6 +27,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from .authorization import ORDER_ENTRY, AuthorizationError, audit, resolve_context
 from .config import APPROVE_ROLE, get_shopify_config
+from .product_pick import format_eta
 from .sources import draft_orders as shop
 from .sources.shopify import ShopifyError
 
@@ -259,16 +260,31 @@ def prepare(ctx, raw_target, raw_lines, note=None):
     calc = shop.calculate(build_input(subject, lines, order_note, ["smith-order-entry"]))
     check_pricing(lines, calc)
 
-    variants = shop.get_variants([line["variant_id"] for line in lines], include_inventory=ctx.has("inventory"))
+    variants = shop.get_variants([line["variant_id"] for line in lines])
     warnings = []
+    stock_notes = False
     if not subject.get("shipping"):
         warnings.append("There is no delivery address on file for this customer, so none was added.")
     for number, (line, got) in enumerate(zip(lines, calc["lines"]), 1):
         info = variants.get(line["variant_id"])
         if not info or info["status"] != "ACTIVE":
             raise EntryError(f"Line {number}: {got['title']} isn't an active product, so it can't be ordered.")
-        if info["stock"] is not None and info["stock"] < line["quantity"]:
-            warnings.append(f"Line {number}: only {info['stock']} in stock for {line['quantity']} ordered.")
+        stock = info.get("stock")
+        # Anyone approving must see that a line is out of stock or a pre-order. Only people with the
+        # inventory capability see the actual count.
+        if stock is not None and stock <= 0:
+            warnings.append(f"Line {number}: {got['title']} is out of stock.")
+            stock_notes = True
+        elif stock is not None and stock < line["quantity"]:
+            if ctx.has("inventory"):
+                warnings.append(f"Line {number}: only {stock} in stock for {line['quantity']} ordered.")
+            else:
+                warnings.append(f"Line {number}: there may not be enough stock for {line['quantity']}.")
+            stock_notes = True
+        if info.get("pre_order"):
+            eta = f", ETA {format_eta(info['eta'])}" if info.get("eta") else ", no ETA set"
+            warnings.append(f"Line {number}: {got['title']} is a pre-order product{eta}.")
+            stock_notes = True
 
     terms = subject["terms"] or shop.default_unpaid_terms()
     payload = {
@@ -288,7 +304,11 @@ def prepare(ctx, raw_target, raw_lines, note=None):
             "total": str(calc["total"]),
         },
     }
-    text = render(payload, calc, warnings)
+    tip = (
+        "Out-of-stock and pre-order items are usually created as unpaid (waiting to be invoiced)."
+        if stock_notes else None
+    )
+    text = render(payload, calc, warnings, tip)
     items = [
         {"id": number, "label": f"{line['quantity']} × {line['title']}"}
         for number, line in enumerate(payload["lines"], 1)
@@ -297,7 +317,7 @@ def prepare(ctx, raw_target, raw_lines, note=None):
     return {"proposal": proposal, "text": text, "warnings": warnings}
 
 
-def render(payload, calc, warnings):
+def render(payload, calc, warnings, tip=None):
     """The draft as people read it. Built here, from Shopify's own numbers."""
     company, place = payload["display"]["name"], payload["display"]["place"]
     head = f"*Draft order for {company}*" + (f" ({place})" if place and place != company else "")
@@ -320,6 +340,8 @@ def render(payload, calc, warnings):
     ]
     if warnings:
         parts.append("⚠️ " + " ".join(warnings))
+    if tip:
+        parts.append(tip)
     parts.append(f"Requested by {payload['requested_by']['name']}.")
     return "\n\n".join(parts)
 

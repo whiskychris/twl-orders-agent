@@ -40,6 +40,7 @@ query ProductCandidates(
       productType
       tags
       totalInventory
+      preOrderEta: metafield(namespace: "backendProduct", key: "preOrderEta") { value }
       inOurBrands: inCollection(id: $ourBrands)
       inIbCollection: inCollection(id: $ibCollection)
       inSpecialCollection: inCollection(id: $specialCollection)
@@ -117,6 +118,8 @@ def _product(node):
         "status": node.get("status"),
         "vendor": node.get("vendor") or "",
         "tags": list(node.get("tags") or []),
+        # Pre-order products carry an ETA in the metafield backendProduct.preOrderEta (a date), if set.
+        "pre_order_eta": ((node.get("preOrderEta") or {}).get("value") or "").strip() or None,
         "flags": {
             "our_brands": bool(node.get("inOurBrands")),
             "ib_collection": bool(node.get("inIbCollection")),
@@ -163,7 +166,24 @@ def title_query(tokens, in_stock=True):
     return " AND ".join(parts)
 
 
+def out_of_stock_query(tokens, tags):
+    """A Shopify search for products with no stock (zero or oversold) that carry one of these tags. Used
+    for the tags whose products may be ordered out of stock (TWL Brand), so they are found even when
+    plenty of in-stock products match the same words."""
+    base = title_query(tokens, in_stock=False)
+    clean = [re.sub(r"['\"]", "", tag) for tag in tags if tag]
+    if not clean:
+        raise ShopifyError("No tags are set for out-of-stock products.")
+    return base + " AND inventory_total:<=0 AND (" + " OR ".join(f"tag:'{tag}'" for tag in clean) + ")"
+
+
 def handles_query(handles):
     """A Shopify search for products with these handles (from the quick order list)."""
     clean = [re.sub(r"[^a-z0-9-]", "", handle.lower()) for handle in handles]
     return " OR ".join(f"handle:{handle}" for handle in clean if handle)
+
+
+def ids_query(product_ids):
+    """A Shopify search for products with these ids (gid://shopify/Product/123 or just 123)."""
+    numbers = [re.sub(r"\D", "", str(product_id).rsplit("/", 1)[-1]) for product_id in product_ids]
+    return " OR ".join(f"id:{number}" for number in numbers if number)

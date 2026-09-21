@@ -28,6 +28,8 @@
 
   "popular_tags": ["Popular", "productGroup_popular"],
 
+  "include_out_of_stock_tags": ["TWL Brand"],
+
   "exclude": {
     "vendors": ["sample"],
     "title_patterns": {
@@ -56,7 +58,7 @@
     {
       "name": "GlenAllachie 10 Cask Strength",
       "aliases": ["glenallachie 10 cask strength", "glen allachie 10 cask strength", "glenallachie 10 cs", "ga 10 cs", "ga 10 cask strength"],
-      "title_pattern": "^GlenAllachie 10 Year Old Cask Strength( Batch \\d+)? Single Malt"
+      "product_ids": ["gid://shopify/Product/8436830666826"]
     },
     {
       "name": "Remnant Golden Fleece",

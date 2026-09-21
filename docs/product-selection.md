@@ -8,8 +8,19 @@ Everything that can change is in `orders_agent/data/product_priority.json`. Edit
 
 ## Never offered
 Samples (vendor "sample" or a title starting `[SAMPLE]`), gift packs, sets and cards (a title containing
-"gift"), bottle splits, inactive products, **anything with no stock**, and anything that isn't in one of the
-four ranges below. Stock is per variant, and zero or negative (oversold) counts as none.
+"gift"), bottle splits, inactive products, anything that isn't in one of the four ranges below, and **anything
+with no stock unless it is tagged TWL Brand**. Stock is per variant, and zero or negative (oversold) counts as
+none.
+
+## Offered, but flagged
+- **Out of stock, tagged TWL Brand** (`include_out_of_stock_tags` in the config). It is offered and marked
+  `out_of_stock`, the draft says "X is out of stock", and it suggests creating the order as unpaid (waiting to
+  be invoiced). Only that tag qualifies: an out-of-stock product that is merely in Our Brands or a trade catalog
+  is still left out. In a list of options, in-stock products come first.
+- **Pre-order** (a `pre-order` tag or `[PRE-ORDER]` in the title). It is offered and marked `pre_order`, with
+  the ETA when the product has one. The ETA is the product metafield `backendProduct.preOrderEta` (a date, shown
+  as "16 Oct 2026"). If it isn't set the flag says "no ETA set".
+- Everyone sees these flags on the draft. Only people with the inventory capability see stock counts.
 
 ## The four ranges (best first)
 | | Collection | Catalog | Tag |
@@ -34,7 +45,7 @@ Ties are ordered by the Popular tag, then the shorter (plainer) title, then stoc
 ## What the agent does with a name
 | Typed | Result |
 |---|---|
-| The full name of a quick order entry, in any wording ("Arran 10", "arran 10yo", "Arran 10 Year Old") | **Uses it**, and says so. If that product is out of stock it does **not** pick a different one: it says it is out of stock and only offers alternatives to choose from. |
+| The full name of a quick order entry, in any wording ("Arran 10", "arran 10yo", "Arran 10 Year Old") | **Uses it**, and says so, including any out-of-stock or pre-order flag. If it can't be ordered at all (for example out of stock and not tagged TWL Brand) it does **not** pick a different one: it says so and only offers alternatives to choose from. |
 | Part of a name ("arran", "ardnahoe") | **Asks**, with the quick order products first, then the rest of the brand, then the ranges. |
 | One clear winner on priority brand and range, with at least two meaningful words typed | **Uses it**. |
 | A single matching product | **Uses it**. |
@@ -45,11 +56,19 @@ Ties are ordered by the Popular tag, then the shorter (plainer) title, then stoc
 number ("10" is not "2010"). "GlenAllachie" and "Glen Allachie" match each other, and "GA12" is read as "ga 12".
 
 ## Editing the quick order list
-Each entry has a `name`, `aliases` (other ways to say it) and either `handles` (the exact product) or a
-`title_pattern` (a regular expression, for products that change, such as GlenAllachie 10 Cask Strength whose
-batch number rotates). A test checks that every entry's own name is one of its aliases and that no two entries
-share an alias. Product handles are stable, but if a product is renamed in a way that changes its handle, update it
-here (the agent will report "on the quick order list but I can't find it in Shopify").
+Each entry has a `name`, `aliases` (other ways to say it) and the exact product, as `handles`, `product_ids`
+or (for something that changes) a `title_pattern`. GlenAllachie 10 Cask Strength is pinned to product
+`8436830666826` (Batch 13, a pre-order with ETA 16 Oct 2026), so **when the next batch is released, that entry
+must be pointed at the new product**, or the old batch stays the answer. A test checks that every entry's own
+name is one of its aliases and that no two entries share an alias. If a product can't be found the agent reports
+"on the quick order list but I can't find it in Shopify".
+
+### Could the list live in Shopify instead?
+Yes, and it would remove the batch problem, because staff could swap the product without a deploy. A **manual
+collection** (for example "Sales Quick Order") holds which products are on the list, and its manual sort
+order is the priority order. A collection has no place for the short names, so those would be a single-line
+product field ("short name", separated by commas) on each product in it, edited in the Shopify admin. Smart
+collections won't do: they can't keep a hand-set order.
 
 ## Not built yet
 Ordering frequency ("what this customer usually orders", "best sellers"). The Popular tag is used as a tie-break

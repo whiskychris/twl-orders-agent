@@ -3,8 +3,10 @@
 A search for "Arran 10" matches a dozen products: the core bottling, a different batch, independent
 bottler casks, samples, a gift pack. TWL's rules (data/product_priority.json) say which one is meant:
 
-  Never offered   samples, gift packs and cards, bottle splits, inactive products, anything with no stock,
-                  and anything that isn't in one of the four TWL ranges below.
+  Never offered   samples, gift packs and cards, bottle splits, inactive products, anything that isn't in
+                  one of the four TWL ranges below, and anything with no stock EXCEPT products tagged
+                  TWL Brand: those are offered but flagged "out of stock" (they are often taken as unpaid
+                  or back orders). Pre-order products are offered and flagged, with their ETA.
   Ranges (best first)
     1  Our Brands collection, Trade Core catalog, TWL Brand tag
     2  TWL Independent Bottlers collection, Trade IBs catalog, TWL IB tag
@@ -28,6 +30,7 @@ words). A partial match on the quick order list only lifts a product in the list
 import json
 import re
 import unicodedata
+from datetime import date
 from pathlib import Path
 
 from .sources import product_search as search
@@ -63,9 +66,12 @@ def load_config():
     raw["_vendors"] = {vendor.lower() for vendor in raw["exclude"]["vendors"]}
     raw["_brands"] = [brand.lower() for brand in raw["priority_brands"]]
     raw["_popular"] = {tag.lower() for tag in raw["popular_tags"]}
+    raw["_oos_tags"] = {tag.lower() for tag in raw.get("include_out_of_stock_tags", [])}
     for entry in raw["quick_order"]:
-        if not entry.get("handles") and not entry.get("title_pattern"):
-            raise RuntimeError(f"product_priority.json: quick order '{entry['name']}' needs handles or a title_pattern")
+        if not (entry.get("handles") or entry.get("product_ids") or entry.get("title_pattern")):
+            raise RuntimeError(
+                f"product_priority.json: quick order '{entry['name']}' needs handles, product_ids or a title_pattern"
+            )
         entry["_aliases"] = [frozenset(tokens(alias)) for alias in entry["aliases"]]
         entry["_regex"] = re.compile(entry["title_pattern"], re.I) if entry.get("title_pattern") else None
     _config["value"] = raw
@@ -160,10 +166,12 @@ def assess(product, config):
                 exclusion = reason
                 break
     in_stock = [variant for variant in product["variants"] if variant["stock"] > 0]
+    may_be_out_of_stock = bool(tags & config["_oos_tags"])   # TWL Brand: offered, but flagged
     if exclusion is None and tier is None:
         exclusion = "not_in_a_twl_range"
-    if exclusion is None and not in_stock:
+    if exclusion is None and not in_stock and not may_be_out_of_stock:
         exclusion = "no_stock"
+    offered = in_stock or (list(product["variants"]) if may_be_out_of_stock else [])
 
     brand_rank = NOT_FOUND
     for tag in tags:
@@ -176,7 +184,9 @@ def assess(product, config):
         "why": sources,
         "brand_rank": brand_rank,
         "popular": bool(tags & config["_popular"]),
-        "variants": in_stock,
+        "variants": offered,
+        "pre_order": "pre-order" in tags or "[pre-order]" in product["title"].lower(),
+        "eta": product.get("pre_order_eta"),
     }
 
 
@@ -202,6 +212,15 @@ def _display(product, variant):
     return name
 
 
+def format_eta(value):
+    """'2026-10-16' -> '16 Oct 2026'. Anything else is shown as it is."""
+    try:
+        day = date.fromisoformat(str(value).strip()[:10])
+    except ValueError:
+        return str(value).strip()
+    return f"{day.day} {day.strftime('%b %Y')}"
+
+
 def _option(number, item, include_inventory, quick_name=None):
     product, variant = item["product"], item["variant"]
     why = ([f"Quick order list: {quick_name}"] if quick_name else []) + list(item["why"])
@@ -215,8 +234,17 @@ def _option(number, item, include_inventory, quick_name=None):
         "abv": _abv(product),
         "why": why,
     }
-    if "pre-order" in product["title"].lower():
-        option["warning"] = "This is a pre-order product."
+    warnings = []
+    if item["oos"]:
+        option["out_of_stock"] = True
+        warnings.append("Out of stock. It can still be ordered (usually as unpaid, waiting to be invoiced).")
+    if item["pre_order"]:
+        option["pre_order"] = True
+        if item["eta"]:
+            option["eta"] = format_eta(item["eta"])
+        warnings.append("Pre-order product" + (f", ETA {option['eta']}" if item["eta"] else ", no ETA set") + ".")
+    if warnings:
+        option["warnings"] = warnings
     if include_inventory:
         option["in_stock"] = variant["stock"]
     return option
@@ -246,8 +274,12 @@ def _entries(config, query_tokens):
 
 
 def _entry_products(config, entry):
-    if entry.get("handles"):
-        return search.search(config, search.handles_query(entry["handles"]), 20)
+    pinned = [q for q in (
+        search.handles_query(entry["handles"]) if entry.get("handles") else "",
+        search.ids_query(entry["product_ids"]) if entry.get("product_ids") else "",
+    ) if q]
+    if pinned:
+        return search.search(config, " OR ".join(pinned), 20)
     found = search.search(config, search.title_query(tokens(entry["name"]), in_stock=False), POOL_SIZE)
     return [p for p in found if entry["_regex"].search(p["title"])]
 
@@ -268,13 +300,21 @@ def _items(products, config, quick_index):
             left_out.setdefault(assessment["exclusion"], []).append(product["title"])
             continue
         for variant in assessment["variants"]:
-            items.append({**assessment, "variant": variant, "quick_rank": quick_index.get(product["id"], NOT_FOUND)})
+            items.append({
+                **assessment,
+                "variant": variant,
+                "oos": variant["stock"] <= 0,
+                "quick_rank": quick_index.get(product["id"], NOT_FOUND),
+            })
     return items, left_out
 
 
 def _sort_key(item):
+    # In stock before out of stock, but only after the quick order list: an out-of-stock quick order
+    # product is still the one people asked for.
     return (
         item["quick_rank"],
+        item["oos"],
         item["brand_rank"],
         item["tier"],
         not item["popular"],
@@ -287,7 +327,9 @@ def _rank_key(item):
     """What decides whether one candidate is CLEARLY better than another: priority brand, then range.
     Title length, popularity and stock only order equals. The quick order list is deliberately NOT here:
     it lifts a product in the list of options, but only typing an entry's full name (step A in decide)
-    lets it choose on its own. Otherwise 'sherry cask' would pick Arran Sherry over Arran 14."""
+    lets it choose on its own. Otherwise 'sherry cask' would pick Arran Sherry over Arran 14. Being in
+    stock is not here either: it orders the options, but "Arran 14" must not auto-pick the in-stock Palo
+    Cortado cask over the core Arran 14, which is out of stock and is probably what was meant."""
     return (item["brand_rank"], item["tier"])
 
 
@@ -361,7 +403,8 @@ def _use(item, include_inventory, quick_name, unavailable):
         "decision": "use",
         "choice": _option(1, item, include_inventory, quick_name),
         "unavailable": unavailable,
-        "guidance": "Use this product. Tell the user which one you chose, in one short line, then continue.",
+        "guidance": "Use this product. Tell the user which one you chose, in one short line. If it has warnings "
+        "(out of stock, or a pre-order with its ETA), say so plainly in that same line, then continue.",
     }
 
 
@@ -373,7 +416,8 @@ def _ask(items, include_inventory, quick_name, unavailable, lead=None):
         "more_matches": max(0, len(items) - len(shown)),
         "unavailable": unavailable,
         "guidance": (lead + " " if lead else "") + "Ask the user which one they mean. List these options with their numbers, "
-        "showing the name, brand and ABV. Do NOT choose for them. If none is right, ask them to say more.",
+        "showing the name, brand and ABV, and any warning next to it (out of stock, or pre-order with its ETA). "
+        "Do NOT choose for them. If none is right, ask them to say more.",
     }
 
 
@@ -410,9 +454,17 @@ def find_for_order(query, include_inventory=False):
     exact, related = _entries(config, query_tokens)
     quick_products = {entry["name"]: _entry_products(config, entry) for entry in exact + related}
     pool = search.search(config, search.title_query(query_tokens, in_stock=True), POOL_SIZE)
+    full = len(pool) >= POOL_SIZE
+    if config["include_out_of_stock_tags"]:
+        # Products that may be ordered out of stock (TWL Brand) are searched separately, so they are
+        # found even when plenty of in-stock products match the same words.
+        more = search.search(config, search.out_of_stock_query(query_tokens, config["include_out_of_stock_tags"]), POOL_SIZE)
+        full = full or len(more) >= POOL_SIZE
+        have = {p["id"] for p in pool}
+        pool = pool + [p for p in more if p["id"] not in have]
 
     decision = decide(query, config, pool, quick_products, include_inventory)
-    if len(pool) >= POOL_SIZE:
+    if full:
         decision["note"] = "Many products matched, so some may not be shown. A fuller name narrows it."
     if decision["decision"] == "none":
         # Say why: the matches that exist but are out of stock.

@@ -56,14 +56,19 @@ query Customer($id: ID!) {
 """
 
 VARIANTS_BY_ID = """
-query VariantsById($ids: [ID!]!, $withInventory: Boolean!) {
+query VariantsById($ids: [ID!]!) {
   nodes(ids: $ids) {
     ... on ProductVariant {
       id
       sku
       displayName
-      inventoryQuantity @include(if: $withInventory)
-      product { status }
+      inventoryQuantity
+      product {
+        status
+        title
+        tags
+        preOrderEta: metafield(namespace: "backendProduct", key: "preOrderEta") { value }
+      }
     }
   }
 }
@@ -225,19 +230,25 @@ def find_customers(query, limit=5):
     }
 
 
-def get_variants(ids, include_inventory=False):
-    """{variant_id: {"status", "sku", "name", "stock"}} for warnings on the draft."""
+def get_variants(ids):
+    """{variant_id: {status, sku, name, stock, pre_order, eta}} for the warnings on a draft. The stock
+    number is returned to the caller, which decides what a person is allowed to see of it: a draft always
+    says a line is out of stock, but only people with the inventory capability see the count."""
     if not ids:
         return {}
-    data = graphql(VARIANTS_BY_ID, {"ids": list(ids), "withInventory": bool(include_inventory)})
+    data = graphql(VARIANTS_BY_ID, {"ids": list(ids)})
     found = {}
     for node in data.get("nodes") or []:
         if node:
+            product = node.get("product") or {}
+            tags = {tag.lower() for tag in product.get("tags") or []}
             found[node["id"]] = {
-                "status": (node.get("product") or {}).get("status"),
+                "status": product.get("status"),
                 "sku": node.get("sku"),
                 "name": node.get("displayName"),
-                "stock": node.get("inventoryQuantity") if include_inventory else None,
+                "stock": node.get("inventoryQuantity"),
+                "pre_order": "pre-order" in tags or "[pre-order]" in str(product.get("title", "")).lower(),
+                "eta": ((product.get("preOrderEta") or {}).get("value") or "").strip() or None,
             }
     return found
 
