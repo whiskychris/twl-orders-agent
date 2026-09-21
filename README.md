@@ -22,10 +22,20 @@ routing. This service implements the gateway's agent contract v1 and stays state
 | "Has Jane Smith ordered before?" (restricted) | `search_customers` |
 
 ## Who can see what
-Roles come from the gateway on every request:
-- `orders.use`: orders, products, stock.
-- `orders.customers`: also customer names, emails, phones and addresses. Without it those fields are
-  never requested from Shopify, and the customer tool does not exist for that user.
+The gateway proves who is asking and passes a stable `user_id` (for example `twl:chris-ross`) with the
+conversation's visibility (`dm` or `channel`). This service owns what each person may see, as a list of
+**capabilities** in Secret Manager (`twl-orders-authz`):
+
+| Capability | Gives |
+|---|---|
+| `orders` | order search, detail and summaries (no customer fields) |
+| `products` | product and variant search (no stock quantities) |
+| `inventory` | stock by location, low stock, and stock quantities on products |
+| `customers` | customer names, emails, phones, addresses, the order note, and free-text order search. **Direct messages only.** |
+
+Roles from the gateway only open the door (`orders.use`). Anyone not on the list gets nothing. If the list
+can't be read, nobody gets anything. Tools for a capability the user lacks are not registered, and fields
+they may not see are never requested from Shopify. See `docs/authorization.md`.
 
 It cannot write anything, and it cannot see costs or margins.
 

@@ -12,7 +12,7 @@ still offers them), install it on the store, and grant only these **read** scope
 | `read_all_orders` | orders older than 60 days. Needs Shopify's approval for the app. Optional. |
 | `read_products` | products and variants |
 | `read_inventory`, `read_locations` | stock levels by location |
-| `read_customers` | customers. Customer data is only shown to users with the `orders.customers` role |
+| `read_customers` | customers. Customer data is only shown to users with the `customers` capability, in a DM (see `docs/authorization.md`) |
 | `read_assigned_fulfillment_orders`, `read_merchant_managed_fulfillment_orders`, `read_third_party_fulfillment_orders` | fulfilments and tracking on an order |
 
 No write scopes. If a write scope is ever added to the app, this agent still has no tool that uses it, but
@@ -40,8 +40,10 @@ Fixed queries only, validated against Shopify's Admin schema. The model supplies
 numbers, which go in as GraphQL variables. It never writes GraphQL.
 
 Not requested at all: unit costs and margins, payment details, full billing addresses. Customer names, emails,
-phones and shipping addresses are requested only for callers with `orders.customers` (via `@include`
-directives), so they are never fetched for anyone else.
+phones, shipping addresses and the order note are requested only for callers with the `customers` capability
+in a DM, and stock quantities only with `inventory` (all via `@include` directives), so they are never fetched
+for anyone else. The Shopify app itself holds one set of scopes for everyone. The per-person limits are
+enforced by this service.
 
 ## Limits to know about
 - Orders older than 60 days are invisible without `read_all_orders`. The assistant says so.

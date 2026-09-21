@@ -19,14 +19,33 @@ from ..config import get_shopify_config
 MAX_RETRIES = 3
 REQUEST_TIMEOUT = 30
 
-# Search filters that look people up. Without the customers role these are refused. This is a
-# best-effort guard to minimise exposure, not a security boundary. The real gate is that customer
-# fields are never requested for users without the role.
-CUSTOMER_FILTER = re.compile(
-    r"\b(email|phone|customer_id|customer|first_name|last_name|billing_address|"
-    r"shipping_address|address)\s*:",
-    re.IGNORECASE,
+# Without the customers capability, order searches may use ONLY these structured filters. Free
+# text and customer filters are refused, because Shopify's default search also matches customer
+# names and emails, and even a list of order names would reveal who has ordered. This is an
+# allowlist on purpose: anything not named here is refused. The other gate is that customer
+# fields (including the order note, which often holds names and phone numbers) are never
+# requested from Shopify unless the caller has the customers capability.
+ALLOWED_ORDER_FILTERS = frozenset(
+    {
+        "created_at",
+        "updated_at",
+        "processed_at",
+        "cancelled_at",
+        "financial_status",
+        "fulfillment_status",
+        "status",
+        "name",
+        "sku",
+        "tag",
+        "tag_not",
+        "source_name",
+        "channel",
+        "return_status",
+    }
 )
+_QUERY_TOKEN = re.compile(r'[^\s"()]+:"[^"]*"|"[^"]*"|\(|\)|[^\s()]+')
+_FILTER_TOKEN = re.compile(r"^-?([A-Za-z_]+):(\S.*)$")
+_QUERY_OPERATORS = frozenset({"AND", "OR", "NOT"})
 
 _token_cache = {"token": None, "expires_at": 0.0}
 
@@ -132,17 +151,28 @@ def clamp(value, low, high, default):
     return max(low, min(high, number))
 
 
-def needs_customer_access(query):
-    text = str(query or "")
-    return bool(CUSTOMER_FILTER.search(text)) or "@" in text
+def order_query_is_structured(query):
+    """True if every part of an order search is an allowed structured filter (or AND/OR/NOT and
+    brackets). An empty search is allowed. Free text and any other filter are not."""
+    for token in _QUERY_TOKEN.findall(str(query or "")):
+        if token in ("(", ")") or token.upper() in _QUERY_OPERATORS:
+            continue
+        match = _FILTER_TOKEN.match(token)
+        if not match or match.group(1).lower() not in ALLOWED_ORDER_FILTERS:
+            return False
+    return True
 
 
 def _guard(query, include_customer):
-    if not include_customer and needs_customer_access(query):
-        raise RestrictedError(
-            "Looking things up by customer needs the orders.customers role. "
-            "Ask the user to request access, or search by order number, SKU or date instead."
-        )
+    """Refuse order searches that could reveal customers, for callers without that capability."""
+    if include_customer or order_query_is_structured(query):
+        return
+    raise RestrictedError(
+        "This user does not have customer access, so order searches must use only these filters: "
+        + ", ".join(sorted(ALLOWED_ORDER_FILTERS))
+        + ". Free text, names, emails and addresses can't be searched. Search by order number "
+        "(name:1234), SKU, status, tag or date instead."
+    )
 
 
 def _money(price_set):
@@ -200,7 +230,7 @@ query OrderDetail($query: String!, $withCustomer: Boolean!) {
       closedAt
       displayFinancialStatus
       displayFulfillmentStatus
-      note
+      note @include(if: $withCustomer)
       tags
       sourceName
       currentSubtotalPriceSet { shopMoney { amount currencyCode } }
@@ -241,7 +271,7 @@ query OrderTotals($query: String!, $first: Int!, $after: String) {
 """
 
 SEARCH_PRODUCTS = """
-query SearchProducts($query: String!, $first: Int!) {
+query SearchProducts($query: String!, $first: Int!, $withInventory: Boolean!) {
   products(first: $first, query: $query, sortKey: TITLE) {
     nodes {
       id
@@ -251,8 +281,8 @@ query SearchProducts($query: String!, $first: Int!) {
       vendor
       productType
       tracksInventory
-      totalInventory
-      variants(first: 20) { nodes { sku title price inventoryQuantity } }
+      totalInventory @include(if: $withInventory)
+      variants(first: 20) { nodes { sku title price inventoryQuantity @include(if: $withInventory) } }
     }
     pageInfo { hasNextPage }
   }
@@ -395,7 +425,6 @@ def get_order(order_name, include_customer=False):
             "processed_at": node.get("processedAt"),
             "closed_at": node.get("closedAt"),
             "cancel_reason": node.get("cancelReason"),
-            "note": node.get("note"),
             "subtotal": _money(node.get("currentSubtotalPriceSet")),
             "shipping": _money(node.get("totalShippingPriceSet")),
             "tax": _money(node.get("currentTotalTaxSet")),
@@ -427,6 +456,10 @@ def get_order(order_name, include_customer=False):
             ],
         }
     )
+    # The note is only fetched for callers with the customers capability (it often holds names
+    # and phone numbers), so it is present here only for them.
+    if node.get("note"):
+        order["note"] = node["note"]
     customer = node.get("customer")
     if customer:
         order["customer"] = {
@@ -493,31 +526,40 @@ def summarise_orders(query, include_customer=False, max_pages=4):
     }
 
 
-def search_products(query, limit=20):
-    data = graphql(SEARCH_PRODUCTS, {"query": str(query or ""), "first": clamp(limit, 1, 25, 20)})
+def search_products(query, limit=20, include_inventory=False):
+    """Products and variants. Stock quantities are only requested with the inventory capability."""
+    data = graphql(
+        SEARCH_PRODUCTS,
+        {
+            "query": str(query or ""),
+            "first": clamp(limit, 1, 25, 20),
+            "withInventory": include_inventory,
+        },
+    )
     connection = data["products"]
     products = []
     for node in connection["nodes"]:
-        products.append(
-            {
-                "title": node["title"],
-                "handle": node.get("handle"),
-                "status": node.get("status"),
-                "vendor": node.get("vendor"),
-                "product_type": node.get("productType"),
-                "tracks_inventory": node.get("tracksInventory"),
-                "total_inventory": node.get("totalInventory"),
-                "variants": [
-                    {
-                        "sku": variant.get("sku"),
-                        "title": variant.get("title"),
-                        "price": variant.get("price"),
-                        "inventory_quantity": variant.get("inventoryQuantity"),
-                    }
-                    for variant in _nodes(node.get("variants"))
-                ],
+        product = {
+            "title": node["title"],
+            "handle": node.get("handle"),
+            "status": node.get("status"),
+            "vendor": node.get("vendor"),
+            "product_type": node.get("productType"),
+            "tracks_inventory": node.get("tracksInventory"),
+            "variants": [],
+        }
+        if include_inventory:
+            product["total_inventory"] = node.get("totalInventory")
+        for variant in _nodes(node.get("variants")):
+            row = {
+                "sku": variant.get("sku"),
+                "title": variant.get("title"),
+                "price": variant.get("price"),
             }
-        )
+            if include_inventory:
+                row["inventory_quantity"] = variant.get("inventoryQuantity")
+            product["variants"].append(row)
+        products.append(product)
     return {"products": products, "has_more": connection["pageInfo"]["hasNextPage"]}
 
 
