@@ -1,9 +1,10 @@
 # Order entry
 
 Sales (for example Jimmy, in the sales channel) tag Smith with a new order for an **existing customer**: the
-company, the products, the quantities, and optionally a discount per product. Smith prepares a draft, posts
-it in the thread, and only after someone with approval rights presses a button is the order created in
-Shopify.
+customer, the products, the quantities, and optionally a discount per product. The customer can be a
+**company** (a B2B account, priced with its own price list) or an **individual customer** (normal prices),
+because not every customer is set up as a company. Smith prepares a draft, posts it in the thread, and only
+after someone with approval rights presses a button is the order created in Shopify.
 
 ```
 "orders: new order for Nicks Wine Merchants: 6 x AH10, 12 x sku:GA12 with 10% off"
@@ -29,15 +30,18 @@ person who asked. Customer contact details stay DM-only even for people with `cu
 shows only the company and location name.
 
 ## What happens, and where the safety is
-1. **The model prepares. It cannot create.** It has three tools: `find_company`, `find_variant` and
+1. **The model prepares. It cannot create.** It has three tools: `find_customer`, `find_variant` and
    `prepare_draft_order`. None writes to Shopify. `prepare_draft_order` asks Shopify to *price* the order
    (`draftOrderCalculate`, which saves nothing), checks the answer, and hands the result to the gateway as a
    proposal.
 2. **The draft text is written by code**, from Shopify's own numbers. The model's words are dropped
    when a draft is prepared, so a total can't be misstated.
-3. **Pricing is the customer's own.** The order is raised for the company, location and its main contact, so
-   Shopify applies that company's price list and tax. The location's addresses go straight back to Shopify
-   and never reach the model.
+3. **Pricing is the customer's own.** For a company, the order is raised for the company, location and its main
+   contact, so Shopify applies that company's price list and tax. For an individual it is raised for the
+   customer at normal prices. Addresses go straight back to Shopify and never reach the model. A person who is
+   a contact at a company can't be ordered as an individual, because that would skip the company's prices and
+   terms: the search leaves them out and the order has to go through the company. A customer with no delivery
+   address on file gets a warning on the draft, not a refusal.
 4. **Discounts are verified.** Shopify's preview must show the discount as intended (a per-unit dollar
    amount is sent as the whole-line amount, then checked). If it doesn't match, the draft is refused, never
    quietly created wrong.
@@ -55,9 +59,15 @@ shows only the company and location name.
 "Paid" means the order was invoiced through Xero. This agent never touches Xero. It records the choice:
 - **Create (paid):** the draft is completed normally, so Shopify records the order as paid. The order note
   says "Marked paid: invoiced in Xero" and who approved.
-- **Create (unpaid):** the draft gets payment terms first (the location's own terms, else "Due on
+- **Create (unpaid):** the draft gets payment terms first (the company location's own terms, else "Due on
   fulfilment"), so Shopify creates it with payment outstanding. It is your back-order / waiting-to-invoice
   state. The deprecated `paymentPending` argument is not used.
+
+## Customer emails
+Customers are emailed by Shopify's usual order notifications when the order is **created**, not while it is a
+draft. This agent doesn't send email and doesn't control that: the draft says so, so approvers know that
+pressing Create can email the customer. Test orders should be for TWL's own account or a customer whose email
+is yours.
 
 ## Shopify setup
 The app needs these extra scopes (already listed in `shopify.app.toml`): `read_companies`,
@@ -66,12 +76,15 @@ The app needs these extra scopes (already listed in `shopify.app.toml`): `read_c
 clear message and nothing is created.
 
 ## Verify on the first real order
-Two behaviours can only be confirmed against the live store. Start with a small order for TWL's own company
-("The Whisky List") and check:
+A few behaviours can only be confirmed against the live store. Start with a small order for TWL's own
+company ("The Whisky List", which has Net 30 terms) and check:
 1. **Paid vs unpaid.** Paid shows as paid with no payment terms. Unpaid shows the payment terms and an
    outstanding balance. If a company's default terms make a "paid" order look pending, tell me.
 2. **Discounts and totals.** The draft's numbers match what Shopify shows on the order.
-Also confirm that no email goes to the customer when an order is created.
+3. **An individual customer** (one who isn't a company). Confirm normal prices, and that payment terms can
+   be put on their draft. If Shopify refuses terms for individuals, "unpaid" will fail with a clear message.
+4. **Addresses** carry over from the company location or the customer's default address.
+5. **The customer email** arrives (or doesn't) as Shopify's notification settings say.
 
 ## Not covered
 New customers, shipping charges, delivery dates, editing or cancelling an existing order, refunds, and

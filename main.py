@@ -76,9 +76,9 @@ def describe_open_draft(open_proposal):
         if isinstance(line, dict)
     ]
     draft = {
-        "company": payload.get("company_name"),
-        "company_id": payload.get("company_id"),
-        "location_id": payload.get("location_id"),
+        "customer": (payload.get("display") or {}).get("name"),
+        "place": (payload.get("display") or {}).get("place"),
+        "target": payload.get("target"),
         "lines": lines,
         "note": payload.get("note"),
     }

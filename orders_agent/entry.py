@@ -1,4 +1,5 @@
-"""Order entry: prepare a draft order for an existing customer (company), then, only after a person with
+"""Order entry: prepare a draft order for an existing customer (a company location, or an individual
+customer), then, only after a person with
 the approve role presses a button, create it in Shopify.
 
 Two phases, with a hard wall between them:
@@ -32,6 +33,7 @@ from .sources.shopify import ShopifyError
 GID = {
     "company": re.compile(r"^gid://shopify/Company/\d+$"),
     "location": re.compile(r"^gid://shopify/CompanyLocation/\d+$"),
+    "customer": re.compile(r"^gid://shopify/Customer/\d+$"),
     "variant": re.compile(r"^gid://shopify/ProductVariant/\d+$"),
 }
 TOKEN = re.compile(r"^[a-z0-9][a-z0-9-]{6,90}$")
@@ -153,9 +155,10 @@ def _expected_discount(line, unit_price):
     return (value * line["quantity"] if discount["type"] == "per_unit" else value).quantize(CENTS, rounding=ROUND_HALF_UP)
 
 
-def build_input(location, lines, note, tags, terms_id=None):
-    """The DraftOrderInput for Shopify. The company location's addresses go straight back to Shopify
-    here and never reach the model."""
+def build_input(subject, lines, note, tags, terms_id=None):
+    """The DraftOrderInput for Shopify. `subject` is a company location (priced with the company's own
+    price list) or an individual customer (normal prices). Addresses go straight back to Shopify here
+    and never reach the model."""
     items = []
     for line in lines:
         item = {"variantId": line["variant_id"], "quantity": line["quantity"]}
@@ -163,23 +166,58 @@ def build_input(location, lines, note, tags, terms_id=None):
         if applied:
             item["appliedDiscount"] = applied
         items.append(item)
-    draft = {
-        "purchasingEntity": {
+    if subject["kind"] == "company":
+        entity = {
             "purchasingCompany": {
-                "companyId": location["company_id"],
-                "companyLocationId": location["location_id"],
-                "companyContactId": location["contact_id"],
+                "companyId": subject["company_id"],
+                "companyLocationId": subject["location_id"],
+                "companyContactId": subject["contact_id"],
             }
-        },
-        "lineItems": items,
-        "shippingAddress": location["shipping"],
-        "billingAddress": location["billing"],
-        "tags": list(tags),
-        "note": note,
-    }
+        }
+    else:
+        entity = {"customerId": subject["customer_id"]}
+    draft = {"purchasingEntity": entity, "lineItems": items, "tags": list(tags), "note": note}
+    if subject.get("shipping"):
+        draft["shippingAddress"] = subject["shipping"]
+    if subject.get("billing"):
+        draft["billingAddress"] = subject["billing"]
     if terms_id:
         draft["paymentTerms"] = {"paymentTermsTemplateId": terms_id}
     return draft
+
+
+def normalize_target(raw):
+    """Who the order is for: a company location, or an individual customer. Exactly one of the two."""
+    raw = raw if isinstance(raw, dict) else {}
+    company_id, location_id, customer_id = (str(raw.get(key) or "").strip() for key in ("company_id", "location_id", "customer_id"))
+    if customer_id and (company_id or location_id):
+        raise EntryError("Give either a company and location, or an individual customer, not both.")
+    if customer_id:
+        if not GID["customer"].match(customer_id):
+            raise EntryError("Use a customer_id that find_customer returned.")
+        return {"kind": "customer", "customer_id": customer_id}
+    if GID["company"].match(company_id) and GID["location"].match(location_id):
+        return {"kind": "company", "company_id": company_id, "location_id": location_id}
+    raise EntryError("Use the company_id and location_id (or the customer_id) that find_customer returned.")
+
+
+def resolve_subject(target):
+    """Look the customer up in Shopify and check the order can be raised for them."""
+    if target["kind"] == "customer":
+        return shop.get_customer(target["customer_id"])
+    location = shop.get_location(target["location_id"])
+    if location["company_id"] != target["company_id"]:
+        raise EntryError("That location doesn't belong to that company.")
+    if not location["contact_id"]:
+        raise EntryError(f"{location['company_name']} has no contact in Shopify, so an order can't be raised for it yet.")
+    return location
+
+
+def _display(subject):
+    """What people are shown: a company (and its location) or the customer's name. Nothing else."""
+    if subject["kind"] == "company":
+        return {"name": subject["company_name"], "place": subject["location_name"]}
+    return {"name": subject["name"], "place": None}
 
 
 def check_pricing(lines, calc):
@@ -206,29 +244,25 @@ def check_pricing(lines, calc):
 # --- phase 1: prepare (read-only) -----------------------------------------------------------------------
 
 
-def prepare(ctx, company_id, location_id, raw_lines, note=None):
-    """Check and price a draft. Returns {"proposal", "text", "warnings"}. Raises EntryError. Saves nothing."""
+def prepare(ctx, raw_target, raw_lines, note=None):
+    """Check and price a draft. Returns {"proposal", "text", "warnings"}. Raises EntryError. Saves nothing.
+    raw_target is {"company_id", "location_id"} or {"customer_id"}."""
     if not ctx.has(ORDER_ENTRY):
         raise EntryError("This user can't raise orders here.")
-    if not GID["company"].match(str(company_id or "")) or not GID["location"].match(str(location_id or "")):
-        raise EntryError("Use a company_id and location_id that find_company returned.")
+    target = normalize_target(raw_target)
 
     lines = clean_lines(raw_lines)
     user_note = _one_line(note, MAX_NOTE)
-    location = shop.get_location(location_id)
-    if location["company_id"] != company_id:
-        raise EntryError("That location doesn't belong to that company.")
-    if not location["contact_id"]:
-        raise EntryError(f"{location['company_name']} has no contact in Shopify, so an order can't be raised for it yet.")
-    if not location["shipping"]:
-        raise EntryError(f"{location['location_name']} has no shipping address in Shopify. Add one there first.")
+    subject = resolve_subject(target)
 
     order_note = f"Raised in Slack by {ctx.name} via Smith." + (f" {user_note}" if user_note else "")
-    calc = shop.calculate(build_input(location, lines, order_note, ["smith-order-entry"]))
+    calc = shop.calculate(build_input(subject, lines, order_note, ["smith-order-entry"]))
     check_pricing(lines, calc)
 
     variants = shop.get_variants([line["variant_id"] for line in lines], include_inventory=ctx.has("inventory"))
     warnings = []
+    if not subject.get("shipping"):
+        warnings.append("There is no delivery address on file for this customer, so none was added.")
     for number, (line, got) in enumerate(zip(lines, calc["lines"]), 1):
         info = variants.get(line["variant_id"])
         if not info or info["status"] != "ACTIVE":
@@ -236,13 +270,11 @@ def prepare(ctx, company_id, location_id, raw_lines, note=None):
         if info["stock"] is not None and info["stock"] < line["quantity"]:
             warnings.append(f"Line {number}: only {info['stock']} in stock for {line['quantity']} ordered.")
 
-    terms = location["terms"] or shop.default_unpaid_terms()
+    terms = subject["terms"] or shop.default_unpaid_terms()
     payload = {
-        "version": 1,
-        "company_id": company_id,
-        "location_id": location_id,
-        "company_name": location["company_name"],
-        "location_name": location["location_name"],
+        "version": 2,
+        "target": target,
+        "display": _display(subject),
         "lines": [
             {**line, "title": got["title"], "sku": got["sku"]} for line, got in zip(lines, calc["lines"])
         ],
@@ -267,7 +299,7 @@ def prepare(ctx, company_id, location_id, raw_lines, note=None):
 
 def render(payload, calc, warnings):
     """The draft as people read it. Built here, from Shopify's own numbers."""
-    company, place = payload["company_name"], payload["location_name"]
+    company, place = payload["display"]["name"], payload["display"]["place"]
     head = f"*Draft order for {company}*" + (f" ({place})" if place and place != company else "")
     rows = []
     for number, (line, got) in enumerate(zip(payload["lines"], calc["lines"]), 1):
@@ -282,8 +314,9 @@ def render(payload, calc, warnings):
         head,
         "\n".join(rows),
         f"Subtotal {fmt(calc['subtotal'])} · GST {fmt(calc['tax'])} · *Total {fmt(calc['total'])} {currency}*".strip(),
-        f"Priced by Shopify for this customer's price list. If created unpaid, payment terms are *{payload['terms']['name']}*. "
-        "No shipping charge is added.",
+        f"Priced by Shopify for this customer. If created unpaid, payment terms are *{payload['terms']['name']}*. "
+        "No shipping charge is added. Shopify sends its usual order emails to the customer once the order is "
+        "created (not while this is a draft).",
     ]
     if warnings:
         parts.append("⚠️ " + " ".join(warnings))
@@ -303,10 +336,11 @@ def _validate_payload(payload):
     """The payload came from our own proposal, stored by the gateway. Check it anyway before it can
     become a write."""
     try:
-        if payload.get("version") != 1:
+        if payload.get("version") != 2:
             raise ValueError("version")
-        if not GID["company"].match(payload["company_id"]) or not GID["location"].match(payload["location_id"]):
-            raise ValueError("ids")
+        target = normalize_target(payload["target"])
+        if not str(payload["display"]["name"]).strip():
+            raise ValueError("display")
         lines = clean_lines(
             [
                 {
@@ -323,7 +357,7 @@ def _validate_payload(payload):
         terms_id = payload["terms"]["id"]
         if not re.match(r"^gid://shopify/PaymentTermsTemplate/\d+$", terms_id):
             raise ValueError("terms")
-        return lines, expected, terms_id, payload["terms"]["name"], _one_line(payload.get("note"), MAX_NOTE), payload["requested_by"]
+        return target, lines, expected, terms_id, _one_line(payload.get("note"), MAX_NOTE), payload["requested_by"]
     except (KeyError, TypeError, ValueError, InvalidOperation, EntryError, AttributeError):
         raise ActRefused("That draft is malformed, so nothing was created. Ask me to draft it again.") from None
 
@@ -365,8 +399,9 @@ def execute(user, conversation, choice, proposal, request_id):
     if not TOKEN.match(token):
         raise ActRefused("That draft has no valid reference, so I did nothing.")
 
-    lines, expected, terms_id, _terms_name, note, requester = _validate_payload(proposal.get("payload") or {})
+    target, lines, expected, terms_id, note, requester = _validate_payload(proposal.get("payload") or {})
     payload = proposal["payload"]
+    customer_name = payload["display"]["name"]
     paid = choice == "create_paid"
     tag = f"smith-{token}"[:40]
 
@@ -374,22 +409,20 @@ def execute(user, conversation, choice, proposal, request_id):
         existing = shop.find_draft_by_tag(tag)
         if existing and existing.get("status") == "COMPLETED" and existing.get("order"):
             audit("order_entry", request_id, ctx.user_id, ctx.source, ctx.visibility, action="already_created")
-            return _result(existing["order"], payload["company_name"], paid, "Already done. ")
+            return _result(existing["order"], customer_name, paid, "Already done. ")
         if existing and existing.get("status") != "OPEN":
             raise ActRefused("A draft for this already exists in an unexpected state, so I did nothing. Check Shopify.")
 
         if existing:
             draft_id = existing["id"]
         else:
-            location = shop.get_location(payload["location_id"])
-            if location["company_id"] != payload["company_id"] or not location["contact_id"] or not location["shipping"]:
-                raise ActRefused("The company details in Shopify have changed. Ask me to draft it again.")
+            subject = resolve_subject(target)
             order_note = f"Raised in Slack by {requester['name']} via Smith, approved by {ctx.name}."
             order_note += f" {'Marked paid: invoiced in Xero.' if paid else 'Not invoiced yet: unpaid.'}"
             if note:
                 order_note += f" {note}"
 
-            calc = shop.calculate(build_input(location, lines, order_note, ["smith-order-entry"]))
+            calc = shop.calculate(build_input(subject, lines, order_note, ["smith-order-entry"]))
             check_pricing(lines, calc)
             if calc["total"] != Decimal(expected["total"]) or calc["subtotal"] != Decimal(expected["subtotal"]):
                 raise ActRefused(
@@ -397,7 +430,7 @@ def execute(user, conversation, choice, proposal, request_id):
                     "Nothing was created. Ask me to draft it again."
                 )
             draft = shop.create_draft(
-                build_input(location, lines, order_note, ["smith-order-entry", tag], None if paid else terms_id)
+                build_input(subject, lines, order_note, ["smith-order-entry", tag], None if paid else terms_id)
             )
             draft_id = draft["id"]
 
@@ -409,4 +442,4 @@ def execute(user, conversation, choice, proposal, request_id):
         raise ActRefused(f"{exc} (If a draft was saved it is not completed, and is safe to leave.)") from None
 
     audit("order_entry", request_id, ctx.user_id, ctx.source, ctx.visibility, action="created", paid=paid, order=order["name"])
-    return _result(order, payload["company_name"], paid, "")
+    return _result(order, customer_name, paid, "")

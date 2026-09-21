@@ -86,7 +86,7 @@ class AuthContext:
                 " available in a direct message."
             )
         if self.has(ORDER_ENTRY):
-            text += " This user can prepare new orders for existing customers (companies)."
+            text += " This user can prepare new orders for existing customers (companies or individuals)."
         elif ORDER_ENTRY in self.withheld:
             text += (
                 " Preparing new orders is not available in this conversation. It works in a direct"

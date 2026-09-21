@@ -36,6 +36,25 @@ query FindCompanies($query: String!, $first: Int!) {
 }
 """
 
+FIND_CUSTOMERS = """
+query FindCustomers($query: String!, $first: Int!) {
+  customers(first: $first, query: $query) {
+    nodes { id displayName companyContactProfiles { id } }
+  }
+}
+"""
+
+CUSTOMER = """
+query Customer($id: ID!) {
+  customer(id: $id) {
+    id
+    displayName
+    companyContactProfiles { id }
+    defaultAddress { address1 address2 city provinceCode zip countryCodeV2 company firstName lastName phone }
+  }
+}
+"""
+
 FIND_VARIANTS = """
 query FindVariants($query: String!, $first: Int!, $withInventory: Boolean!) {
   productVariants(first: $first, query: $query) {
@@ -196,6 +215,32 @@ def find_companies(query, limit=5):
     return {"companies": companies, "note": "Ask which one if more than one matches." if len(companies) > 1 else None}
 
 
+def find_customers(query, limit=5):
+    """Who an order can be raised for: business customers (companies, with locations) and individual
+    customers. Names and ids only: no emails, phones or addresses. A person who is a contact at a
+    company is left out of the individuals, because an order for them must go through the company (its
+    price list and terms), so the company is what to pick."""
+    term = _clean_search(query)
+    if not term:
+        raise ShopifyError("Give me a customer name to look for.")
+    size = clamp(limit, 1, 10, 5)
+    companies = find_companies(term, size)["companies"]
+    data = graphql(FIND_CUSTOMERS, {"query": term, "first": size})
+    people = [
+        {"customer_id": node["id"], "name": node["displayName"]}
+        for node in _nodes(data.get("customers"))
+        if not node.get("companyContactProfiles")
+    ]
+    matches = len(companies) + len(people)
+    return {
+        "companies": companies,
+        "individual_customers": people,
+        "note": "More than one match. Ask which is meant." if matches > 1 else (
+            None if matches else "No existing customer found. New customers can't be created here."
+        ),
+    }
+
+
 def find_variants(query, limit=10, include_inventory=False):
     """Product variants matching a SKU or title. Selling prices are not returned here: the draft order
     is priced by Shopify for the customer's company (its own price list)."""
@@ -270,6 +315,7 @@ def get_location(location_id):
         contact = contacts[0]["id"] if contacts else None
     template = (node.get("buyerExperienceConfiguration") or {}).get("paymentTermsTemplate")
     return {
+        "kind": "company",
         "location_id": node["id"],
         "location_name": node["name"],
         "company_id": company.get("id"),
@@ -278,6 +324,44 @@ def get_location(location_id):
         "shipping": _address(node.get("shippingAddress")),
         "billing": _address(node.get("billingAddress")) or _address(node.get("shippingAddress")),
         "terms": {"id": template["id"], "name": template["name"]} if template else None,
+    }
+
+
+def get_customer(customer_id):
+    """An individual (non-company) customer with what a draft order needs. The address stays inside this
+    service. A contact at a company is refused: the order has to go through the company."""
+    data = graphql(CUSTOMER, {"id": customer_id})
+    node = data.get("customer")
+    if not node:
+        raise ShopifyError("I couldn't find that customer in Shopify.")
+    if node.get("companyContactProfiles"):
+        raise ShopifyError(
+            f"{node['displayName']} is a contact at a company account. Raise the order for the company so "
+            "it gets the company's prices and terms."
+        )
+    address = node.get("defaultAddress") or {}
+    mailing = None
+    if address.get("address1"):
+        mailing = {
+            "address1": address.get("address1"),
+            "address2": address.get("address2"),
+            "city": address.get("city"),
+            "provinceCode": address.get("provinceCode"),
+            "zip": address.get("zip"),
+            "countryCode": address.get("countryCodeV2"),
+            "company": address.get("company"),
+            "firstName": address.get("firstName"),
+            "lastName": address.get("lastName"),
+            "phone": address.get("phone"),
+        }
+        mailing = {key: value for key, value in mailing.items() if value}
+    return {
+        "kind": "customer",
+        "customer_id": node["id"],
+        "name": node["displayName"],
+        "shipping": mailing,
+        "billing": mailing,
+        "terms": None,
     }
 
 

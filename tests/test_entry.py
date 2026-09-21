@@ -34,7 +34,7 @@ def ctx(capabilities=("orders", "order_entry"), visibility="channel", channel="C
 
 def location(**over):
     base = {
-        "location_id": LOCATION, "location_name": "Nicks Wine Merchants", "company_id": COMPANY,
+        "kind": "company", "location_id": LOCATION, "location_name": "Nicks Wine Merchants", "company_id": COMPANY,
         "company_name": "Nicks Wine Merchants", "contact_id": "gid://shopify/CompanyContact/3",
         "shipping": {"address1": "1 Test St", "city": "Sydney"}, "billing": {"address1": "1 Test St"}, "terms": TERMS,
     }
@@ -135,7 +135,7 @@ def make_prepared():
          mock.patch.object(entry.shop, "calculate", side_effect=fake_calc), \
          mock.patch.object(entry.shop, "get_variants", return_value={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": None}}), \
          mock.patch.object(entry.shop, "default_unpaid_terms", return_value=TERMS):
-        return entry.prepare(ctx(), COMPANY, LOCATION, raw((VARIANT_A, 6)), "PO 123")["proposal"]
+        return entry.prepare(ctx(), {"company_id": COMPANY, "location_id": LOCATION}, raw((VARIANT_A, 6)), "PO 123")["proposal"]
 
 
 class PrepareTests(unittest.TestCase):
@@ -155,7 +155,7 @@ class PrepareTests(unittest.TestCase):
              mock.patch.object(entry.shop, "calculate", side_effect=fake_calc), \
              mock.patch.object(entry.shop, "get_variants", return_value=variants), \
              mock.patch.object(entry.shop, "default_unpaid_terms", return_value=TERMS):
-            return entry.prepare(ctx(capabilities), company, LOCATION, lines, "PO 123")
+            return entry.prepare(ctx(capabilities), {"company_id": company, "location_id": LOCATION}, lines, "PO 123")
 
     def test_a_good_draft_becomes_a_proposal_with_paid_and_unpaid_choices(self):
         result = self.prepare()
@@ -187,7 +187,7 @@ class PrepareTests(unittest.TestCase):
     def test_without_the_capability_nothing_is_priced(self):
         with mock.patch.object(entry.shop, "get_location") as get_location:
             with self.assertRaises(entry.EntryError):
-                entry.prepare(ctx(("orders",)), COMPANY, LOCATION, raw((VARIANT_A, 1)))
+                entry.prepare(ctx(("orders",)), {"company_id": COMPANY, "location_id": LOCATION}, raw((VARIANT_A, 1)))
         get_location.assert_not_called()
 
     def test_refusals(self):
@@ -196,11 +196,14 @@ class PrepareTests(unittest.TestCase):
         with self.assertRaises(entry.EntryError):
             self.prepare(loc=location(contact_id=None))                             # nobody to order as
         with self.assertRaises(entry.EntryError):
-            self.prepare(loc=location(shipping=None))                               # nowhere to ship
-        with self.assertRaises(entry.EntryError):
             self.prepare(variants={VARIANT_A: {"status": "ARCHIVED", "sku": "S", "name": "n", "stock": None}})
         with self.assertRaises(entry.EntryError):
             self.prepare(variants={})
+
+    def test_no_delivery_address_is_a_warning_not_a_refusal(self):
+        result = self.prepare(loc=location(shipping=None, billing=None))
+        self.assertIn("no delivery address", result["text"])
+        self.assertNotIn("shippingAddress", self.last_input)
 
     def test_low_stock_is_a_warning_not_a_refusal(self):
         result = self.prepare(
@@ -214,7 +217,7 @@ class PrepareTests(unittest.TestCase):
              mock.patch.object(entry.shop, "get_location", return_value=location()), \
              mock.patch.object(entry.shop, "calculate", side_effect=lambda i: priced([{"variant_id": VARIANT_A, "quantity": 6}])), \
              mock.patch.object(entry.shop, "default_unpaid_terms", return_value=TERMS):
-            result = entry.prepare(ctx(("orders", "order_entry")), COMPANY, LOCATION, raw((VARIANT_A, 6)))
+            result = entry.prepare(ctx(("orders", "order_entry")), {"company_id": COMPANY, "location_id": LOCATION}, raw((VARIANT_A, 6)))
         self.assertFalse(get_variants.call_args.kwargs["include_inventory"])
         self.assertNotIn("stock", result["text"])
 
@@ -328,13 +331,17 @@ class ExecuteTests(unittest.TestCase):
 
     def test_a_malformed_or_tampered_payload_writes_nothing(self):
         for mutate in (
-            lambda p: p.update(company_id="not-a-gid"),
+            lambda p: p["target"].update(company_id="not-a-gid"),
+            lambda p: p.update(target={"kind": "customer", "customer_id": "gid://shopify/Customer/1", "company_id": COMPANY}),   # both forms
+            lambda p: p.update(target={"kind": "customer", "customer_id": "nope"}),
+            lambda p: p.update(target={}),
+            lambda p: p.pop("display"),
             lambda p: p.update(lines=[]),
             lambda p: p["lines"][0].update(quantity=0),
             lambda p: p["lines"][0].update(variant_id="gid://shopify/Product/1"),
             lambda p: p["terms"].update(id="gid://shopify/Something/1"),
             lambda p: p.pop("expected"),
-            lambda p: p.update(version=2),
+            lambda p: p.update(version=1),
         ):
             proposal = {**self.proposal, "payload": __import__("copy").deepcopy(self.proposal["payload"])}
             mutate(proposal["payload"])
@@ -378,6 +385,115 @@ class ExecuteTests(unittest.TestCase):
                 self.run_execute()
 
 
+CUSTOMER = "gid://shopify/Customer/77"
+
+
+def person(**over):
+    base = {"kind": "customer", "customer_id": CUSTOMER, "name": "Pat Example", "shipping": {"address1": "9 Home St"}, "billing": {"address1": "9 Home St"}, "terms": None}
+    return {**base, **over}
+
+
+class IndividualCustomerTests(unittest.TestCase):
+    """Not every customer is set up as a company. Individuals get normal prices and default terms."""
+
+    def prepare(self, subject=None):
+        def fake_calc(draft_input):
+            self.last_input = draft_input
+            return priced([{"variant_id": i["variantId"], "quantity": i["quantity"], "discount": i.get("appliedDiscount")} for i in draft_input["lineItems"]])
+
+        with mock.patch.object(entry.shop, "get_customer", return_value=subject or person()), \
+             mock.patch.object(entry.shop, "calculate", side_effect=fake_calc), \
+             mock.patch.object(entry.shop, "get_variants", return_value={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": None}}), \
+             mock.patch.object(entry.shop, "default_unpaid_terms", return_value=TERMS):
+            return entry.prepare(ctx(), {"customer_id": CUSTOMER}, raw((VARIANT_A, 2)))
+
+    def test_an_individual_is_ordered_as_a_customer_with_no_company(self):
+        result = self.prepare()
+        self.assertEqual(self.last_input["purchasingEntity"], {"customerId": CUSTOMER})
+        payload = result["proposal"]["payload"]
+        self.assertEqual(payload["target"], {"kind": "customer", "customer_id": CUSTOMER})
+        self.assertEqual(payload["display"], {"name": "Pat Example", "place": None})
+        self.assertEqual(payload["terms"], TERMS)      # no company terms, so the default
+        self.assertIn("Draft order for Pat Example", result["text"])
+        self.assertIn("usual order emails", result["text"])
+
+    def test_the_customers_address_is_used_but_never_shown(self):
+        result = self.prepare()
+        self.assertEqual(self.last_input["shippingAddress"], {"address1": "9 Home St"})
+        self.assertNotIn("9 Home St", result["text"])
+
+    def test_no_address_on_file_is_a_warning(self):
+        result = self.prepare(person(shipping=None, billing=None))
+        self.assertIn("no delivery address", result["text"])
+        self.assertNotIn("shippingAddress", self.last_input)
+
+    def test_targets_must_be_exactly_one_form(self):
+        for bad in (
+            {}, None, "x",
+            {"customer_id": CUSTOMER, "company_id": COMPANY},
+            {"customer_id": CUSTOMER, "location_id": LOCATION},
+            {"customer_id": "gid://shopify/Company/1"},
+            {"company_id": COMPANY},
+            {"location_id": LOCATION},
+            {"company_id": LOCATION, "location_id": COMPANY},
+        ):
+            with self.assertRaises(entry.EntryError, msg=str(bad)):
+                entry.normalize_target(bad)
+        self.assertEqual(entry.normalize_target({"customer_id": CUSTOMER})["kind"], "customer")
+        self.assertEqual(entry.normalize_target({"company_id": COMPANY, "location_id": LOCATION})["kind"], "company")
+
+    def test_a_company_contact_cannot_be_ordered_as_an_individual(self):
+        # Ordering "as" a contact would skip the company's price list and terms.
+        contact = {"customer": {"id": CUSTOMER, "displayName": "Sam Contact", "companyContactProfiles": [{"id": "x"}], "defaultAddress": None}}
+        with mock.patch.object(entry.shop, "graphql", return_value=contact):
+            with self.assertRaises(ShopifyError) as caught:
+                entry.shop.get_customer(CUSTOMER)
+        self.assertIn("company", str(caught.exception))
+
+    def test_search_leaves_company_contacts_out_of_the_individuals(self):
+        people = {"customers": {"nodes": [
+            {"id": "gid://shopify/Customer/1", "displayName": "Pat Example", "companyContactProfiles": []},
+            {"id": "gid://shopify/Customer/2", "displayName": "Sam Contact", "companyContactProfiles": [{"id": "c"}]},
+        ]}}
+        companies = {"companies": {"nodes": [{"id": COMPANY, "name": "Nicks", "mainContact": {"id": "c"}, "contacts": {"nodes": []}, "locations": {"nodes": [{"id": LOCATION, "name": "Nicks"}]}}]}}
+        with mock.patch.object(entry.shop, "graphql", side_effect=[companies, people]):
+            found = entry.shop.find_customers("pat")
+        self.assertEqual([p["name"] for p in found["individual_customers"]], ["Pat Example"])
+        self.assertEqual(found["companies"][0]["name"], "Nicks")
+        self.assertEqual(set(found["individual_customers"][0]), {"customer_id", "name"})   # nothing else leaves
+        self.assertIn("More than one", found["note"])
+
+    def test_search_never_returns_contact_details(self):
+        with mock.patch.object(entry.shop, "graphql", side_effect=[{"companies": {"nodes": []}}, {"customers": {"nodes": []}}]):
+            found = entry.shop.find_customers("nobody")
+        self.assertIn("can't be created", found["note"])
+
+    def test_search_terms_are_stripped_of_shopify_filter_syntax(self):
+        with mock.patch.object(entry.shop, "graphql", side_effect=[{"companies": {"nodes": []}}, {"customers": {"nodes": []}}]) as graphql:
+            entry.shop.find_customers("email:jane@example.com")
+        sent = graphql.call_args_list[0].args[1]["query"]
+        self.assertNotIn(":", sent)
+        self.assertNotIn("@", sent)
+
+    def test_execute_creates_the_order_for_an_individual(self):
+        prepared = self.prepare()["proposal"]
+        proposal = {"token": "orders-20260921-1500-cd34-v1", "kind": prepared["kind"], "items": prepared["items"], "payload": prepared["payload"]}
+        created = []
+        approver = {"id": "U1", "user_id": "twl:jimmy-shore", "name": "Jimmy Shore", "roles": ["orders.use", "orders.approve"]}
+        with mock.patch.object(authorization, "get_authz_config", return_value=USERS), \
+             mock.patch.object(authorization, "get_order_entry_channels", return_value=frozenset({"C0SALES"})), \
+             mock.patch.object(entry.shop, "find_draft_by_tag", return_value=None), \
+             mock.patch.object(entry.shop, "get_customer", return_value=person()), \
+             mock.patch.object(entry.shop, "calculate", side_effect=lambda i: priced([{"variant_id": x["variantId"], "quantity": x["quantity"], "discount": None} for x in i["lineItems"]])), \
+             mock.patch.object(entry.shop, "create_draft", side_effect=lambda i: created.append(i) or {"id": "gid://shopify/DraftOrder/8"}), \
+             mock.patch.object(entry.shop, "complete_draft", return_value={"id": "gid://shopify/Order/3", "name": "#2001", "legacyResourceId": "3"}), \
+             mock.patch.object(entry, "admin_order_url", side_effect=lambda legacy: f"https://admin.example/orders/{legacy}"):
+            result = entry.execute(approver, {"id": "slack:C0SALES:1.1", "source": "slack", "visibility": "channel"}, "create_unpaid", proposal, "r1")
+        self.assertIn("Pat Example", result["text"])
+        self.assertEqual(created[0]["purchasingEntity"], {"customerId": CUSTOMER})
+        self.assertEqual(created[0]["paymentTerms"], {"paymentTermsTemplateId": TERMS["id"]})
+
+
 class ToolTests(unittest.TestCase):
     def names(self, capabilities):
         with mock.patch.object(authorization, "get_order_entry_channels", return_value=frozenset({"C0SALES"})):
@@ -385,8 +501,8 @@ class ToolTests(unittest.TestCase):
         return set(names)
 
     def test_order_entry_tools_exist_only_with_the_capability(self):
-        self.assertTrue({"find_company", "find_variant", "prepare_draft_order"} <= self.names(("orders", "order_entry")))
-        for tool in ("find_company", "find_variant", "prepare_draft_order"):
+        self.assertTrue({"find_customer", "find_variant", "prepare_draft_order"} <= self.names(("orders", "order_entry")))
+        for tool in ("find_customer", "find_variant", "prepare_draft_order"):
             self.assertNotIn(tool, self.names(("orders", "products", "inventory", "customers")))
 
     def test_there_is_no_tool_that_writes(self):

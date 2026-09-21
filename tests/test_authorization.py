@@ -247,11 +247,14 @@ class ToolAvailabilityTests(unittest.TestCase):
         import re
         properties = set(re.findall(r'"(\w+)": \{\*\*(?:STRING|INTEGER|BOOLEAN)', source))
         self.assertTrue(properties)
+        # Names that would read as an access switch. Lookup ids such as customer_id are fine: they pick
+        # WHICH customer, and what may be seen is still decided by the AuthContext, not by the argument.
+        forbidden_words = ("include", "capabilit", "permission", "allow", "bypass", "ignore", "override", "admin", "grant", "role")
+        forbidden_exact = {"customer", "customers", "inventory", "orders", "products", "order_entry", "approve", "approved", "confirm", "paid"}
         for name in properties:
-            self.assertNotIn("customer", name)
-            self.assertNotIn("inventory", name)
-            self.assertNotIn("capabilit", name)
-            self.assertNotIn("include", name)
+            self.assertNotIn(name, forbidden_exact)
+            for word in forbidden_words:
+                self.assertNotIn(word, name)
 
 
 class EndpointTests(unittest.TestCase):

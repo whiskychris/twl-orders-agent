@@ -297,28 +297,32 @@ def build_server(ctx, state=None):
     # --- order entry capability ---------------------------------------------------------------
     # None of these can create anything. prepare_draft_order only prices a draft and hands it to the
     # approval flow. Creating the order happens later, in /v1/act, in code, after an approver presses a
-    # button. Customer contact details are never returned: only company and location names.
+    # button. Customer contact details are never returned: only company and location names, and an
+    # individual customer's name.
 
     if ctx.has(ORDER_ENTRY):
 
-        async def find_company(args):
+        async def find_customer(args):
             return await call(
-                "find_company", ORDER_ENTRY, draft_orders.find_companies, args.get("query", ""), limit=args.get("limit", 5)
+                "find_customer", ORDER_ENTRY, draft_orders.find_customers, args.get("query", ""), limit=args.get("limit", 5)
             )
 
         add(
-            "find_company",
-            "Find an existing customer (a company in Shopify) by name, to raise an order for. Returns the "
-            "company_id and its locations (location_id and name). If more than one company matches, or a "
-            "company has more than one location, ask which one is meant. Never guess.",
+            "find_customer",
+            "Find an existing customer by name, to raise an order for. Returns business customers "
+            "(`companies`, each with company_id and its locations with location_id) and individual "
+            "customers (`individual_customers`, each with customer_id). Orders for a company use its "
+            "company_id and a location_id, and get the company's own prices. Orders for an individual use "
+            "the customer_id. If more than one matches, or a company has several locations, ask which one "
+            "is meant. Never guess. New customers can't be created.",
             _schema(
                 {
-                    "query": {**STRING, "description": "Part of the company name."},
-                    "limit": {**INTEGER, "description": "How many, 1 to 10. Default 5."},
+                    "query": {**STRING, "description": "Part of the customer or company name."},
+                    "limit": {**INTEGER, "description": "How many of each kind, 1 to 10. Default 5."},
                 },
                 required=["query"],
             ),
-            find_company,
+            find_customer,
         )
 
         async def find_variant(args):
@@ -352,8 +356,7 @@ def build_server(ctx, state=None):
                 result = await asyncio.to_thread(
                     entry.prepare,
                     ctx,
-                    args.get("company_id"),
-                    args.get("location_id"),
+                    {key: args.get(key) for key in ("company_id", "location_id", "customer_id")},
                     args.get("lines"),
                     args.get("note"),
                 )
@@ -372,16 +375,18 @@ def build_server(ctx, state=None):
         add(
             "prepare_draft_order",
             "Price a draft order for an existing customer and put it up for approval. Nothing is created "
-            "until a person with approval rights presses a button. Call this again with the FULL corrected "
-            "line list whenever the user asks for a change, which replaces the draft. Only use ids that "
-            "find_company and find_variant returned. Discounts: discount_type is 'percent' (value is the "
+            "until a person with approval rights presses a button. Give EITHER company_id and location_id "
+            "(a company) OR customer_id (an individual), never both. Call this again with the FULL "
+            "corrected line list whenever the user asks for a change, which replaces the draft. Only use ids "
+            "that find_customer and find_variant returned. Discounts: discount_type is 'percent' (value is the "
             "percentage), 'per_unit' (dollars off each unit) or 'line_total' (dollars off the whole line). "
             "If the user's discount is unclear (for example '$50 off' with several units), ask which they "
             "mean before calling.",
             _schema(
                 {
-                    "company_id": {**STRING, "description": "From find_company."},
-                    "location_id": {**STRING, "description": "From find_company."},
+                    "company_id": {**STRING, "description": "A company, from find_customer. Use with location_id."},
+                    "location_id": {**STRING, "description": "The company location, from find_customer."},
+                    "customer_id": {**STRING, "description": "An individual customer, from find_customer. Not with company_id."},
                     "lines": {
                         "type": "array",
                         "description": "Every product line on the order.",
@@ -398,7 +403,7 @@ def build_server(ctx, state=None):
                     },
                     "note": {**STRING, "description": "Optional short note for the order (for example a PO reference)."},
                 },
-                required=["company_id", "location_id", "lines"],
+                required=["lines"],
             ),
             prepare_draft_order,
         )
