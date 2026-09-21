@@ -55,6 +55,26 @@ shows only the company and location name.
 8. **A clear outcome.** A refusal (4xx) tells the gateway nothing was changed. An unexpected failure (5xx)
    makes the gateway say "the result is unknown, check Shopify before retrying".
 
+## Finding a customer by email address
+Sales can give an email instead of a name: `orders: new order for chris@thewhiskylist.com.au (company account): 6 x Arran 10`,
+or "... personal account". One email is one customer record, but that person may also be a contact at a company,
+so there can be two accounts to order on:
+- **Company account**: raised for the company and its location, with the company's price list and payment terms.
+- **Personal account**: raised for the customer at normal prices. The draft warns that the company's price list
+  and terms do not apply.
+
+If both exist and the person didn't say which, the agent asks. If the email is only a personal account it uses
+that. A company with several locations needs the location too.
+
+**The match is exact.** Shopify's own email search is loose: searching `chris@thewhiskylist.com.au` also returns
+`chris+1@`, `chris+2@` and so on, which are different people. The agent fetches the addresses only to compare them
+with what was typed, in code, and keeps the exact one. Lookalikes are ignored, and neither they nor any email
+address is ever shown or passed to the model. What comes back is the account type, the name of the person or
+company, and ids.
+
+**Privacy note:** an email lookup tells whoever has order entry that the address is a customer, their name and the
+companies they are a contact at. Order entry is limited to the people you named and to DMs and #sales, and names
+are what the drafts already show.
 ## Paid and unpaid
 "Paid" means the order was invoiced through Xero. This agent never touches Xero. It records the choice:
 - **Create (paid):** the draft is completed normally, so Shopify records the order as paid. The order note

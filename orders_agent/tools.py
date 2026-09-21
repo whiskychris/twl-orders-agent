@@ -318,7 +318,10 @@ def build_server(ctx, state=None):
             "(`companies`, each with company_id and its locations with location_id) and individual "
             "customers (`individual_customers`, each with customer_id). Orders for a company use its "
             "company_id and a location_id, and get the company's own prices. Orders for an individual use "
-            "the customer_id. Shopify's search is loose, so results include similar names: if exactly one "
+            "the customer_id. To find someone by email address, pass the email as typed: the answer lists their "
+            "`accounts`, matched exactly (a personal account, and a company account if they are a contact at a "
+            "company). If both exist and the person did not say which, ask company or personal. Shopify's name "
+            "search is loose, so results include similar names: if exactly one "
             "customer has exactly the name typed, `exact_match` says so (with the ids ready to use when it is a "
             "company with one location). Use it and say which you chose. Otherwise, or if a company has several "
             "locations, ask which is meant. Never guess. New customers can't be created.",

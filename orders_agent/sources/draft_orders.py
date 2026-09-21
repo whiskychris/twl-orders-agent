@@ -50,8 +50,26 @@ query Customer($id: ID!) {
   customer(id: $id) {
     id
     displayName
-    companyContactProfiles { id }
+    companyContactProfiles { id company { name } }
     defaultAddress { address1 address2 city provinceCode zip countryCodeV2 company firstName lastName phone }
+  }
+}
+"""
+
+# Shopify's email search is loose: "chris@x.com" also returns chris+1@x.com, chris+2@x.com and so on. The
+# email is fetched only to compare it with what was typed, in code. It is never returned to the model.
+CUSTOMER_BY_EMAIL = """
+query CustomerByEmail($query: String!) {
+  customers(first: 10, query: $query) {
+    nodes {
+      id
+      displayName
+      defaultEmailAddress { emailAddress }
+      companyContactProfiles {
+        id
+        company { id name locations(first: 10) { nodes { id name } } }
+      }
+    }
   }
 }
 """
@@ -211,11 +229,65 @@ def find_companies(query, limit=5):
     return {"companies": companies, "note": "Ask which one if more than one matches." if len(companies) > 1 else None}
 
 
+EMAIL = re.compile(r"[A-Za-z0-9._%+'\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+")
+
+
+def find_by_email(email):
+    """Who an email address belongs to, matched EXACTLY (case aside). One email is one customer record, but
+    that person may also be a contact at a company, so there can be two accounts to order on: the company
+    account (the company's price list and terms) and the personal account (normal prices). Returns names
+    and ids only, never the email, phone or address."""
+    typed = email.strip().lower()
+    data = graphql(CUSTOMER_BY_EMAIL, {"query": f'email:"{typed}"'})
+    # Shopify returns near matches too. Keep only the customer whose address is exactly this one.
+    exact = [
+        node for node in _nodes(data.get("customers"))
+        if ((node.get("defaultEmailAddress") or {}).get("emailAddress") or "").strip().lower() == typed
+    ]
+    if not exact:
+        return {
+            "accounts": [],
+            "note": "No customer has exactly that email address. (Similar addresses were ignored.) New customers "
+                    "can't be created here.",
+        }
+    node = exact[0]
+    accounts = []
+    for profile in node.get("companyContactProfiles") or []:
+        company = profile.get("company") or {}
+        if company.get("id"):
+            accounts.append({
+                "account": "company",
+                "name": company["name"],
+                "company_id": company["id"],
+                "locations": [{"location_id": loc["id"], "name": loc["name"]} for loc in _nodes(company.get("locations"))],
+            })
+    accounts.append({"account": "personal", "name": node["displayName"], "customer_id": node["id"]})
+
+    companies = [a for a in accounts if a["account"] == "company"]
+    if not companies:
+        note = (
+            f"This email is a personal customer account ({node['displayName']}), with no company account. Use it, and "
+            "say which you chose."
+        )
+    else:
+        names = " and ".join(a["name"] for a in companies)
+        note = (
+            f"This email belongs to {node['displayName']}, who is a contact at {names}. There are two accounts to "
+            "order on: the company account (the company's own prices and terms) and their personal account (normal "
+            "prices). If the person typing already said which (company or personal), use that. Otherwise ask which "
+            "they mean. A company with several locations also needs the location."
+        )
+    return {"accounts": accounts, "note": note}
+
+
 def find_customers(query, limit=5):
     """Who an order can be raised for: business customers (companies, with locations) and individual
-    customers. Names and ids only: no emails, phones or addresses. A person who is a contact at a
-    company is left out of the individuals, because an order for them must go through the company (its
-    price list and terms), so the company is what to pick."""
+    customers. Names and ids only: no emails, phones or addresses. Searching by name leaves out a person who
+    is a contact at a company, because an order for them by name should go through the company (its price
+    list and terms). Searching by their email address (find_by_email) offers both accounts explicitly."""
+    typed_email = EMAIL.search(str(query or ""))
+    if typed_email:
+        return find_by_email(typed_email.group(0))
     term = _clean_search(query)
     if not term:
         raise ShopifyError("Give me a customer name to look for.")
@@ -338,17 +410,19 @@ def get_location(location_id):
 
 
 def get_customer(customer_id):
-    """An individual (non-company) customer with what a draft order needs. The address stays inside this
-    service. A contact at a company is refused: the order has to go through the company."""
+    """An individual customer (a personal account) with what a draft order needs. The address stays inside
+    this service. If the person is also a contact at a company, `contact_of` names the companies: the order
+    is then on their PERSONAL account, at normal prices, and the draft says so. (A search by name never
+    offers such a person as an individual. Only an email lookup, or an explicit choice, gets here.)"""
     data = graphql(CUSTOMER, {"id": customer_id})
     node = data.get("customer")
     if not node:
         raise ShopifyError("I couldn't find that customer in Shopify.")
-    if node.get("companyContactProfiles"):
-        raise ShopifyError(
-            f"{node['displayName']} is a contact at a company account. Raise the order for the company so "
-            "it gets the company's prices and terms."
-        )
+    contact_of = [
+        (profile.get("company") or {}).get("name")
+        for profile in node.get("companyContactProfiles") or []
+        if (profile.get("company") or {}).get("name")
+    ]
     address = node.get("defaultAddress") or {}
     mailing = None
     if address.get("address1"):
@@ -372,6 +446,7 @@ def get_customer(customer_id):
         "shipping": mailing,
         "billing": mailing,
         "terms": None,
+        "contact_of": contact_of,
     }
 
 

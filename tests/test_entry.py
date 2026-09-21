@@ -471,13 +471,36 @@ class IndividualCustomerTests(unittest.TestCase):
         self.assertEqual(entry.normalize_target({"customer_id": CUSTOMER})["kind"], "customer")
         self.assertEqual(entry.normalize_target({"company_id": COMPANY, "location_id": LOCATION})["kind"], "company")
 
-    def test_a_company_contact_cannot_be_ordered_as_an_individual(self):
-        # Ordering "as" a contact would skip the company's price list and terms.
-        contact = {"customer": {"id": CUSTOMER, "displayName": "Sam Contact", "companyContactProfiles": [{"id": "x"}], "defaultAddress": None}}
+    def test_a_company_contact_can_be_ordered_as_a_personal_account_and_the_draft_says_so(self):
+        # Allowed when asked for (via their email), but the approver must see the company's prices don't apply.
+        contact = {"customer": {"id": CUSTOMER, "displayName": "Sam Contact", "companyContactProfiles": [{"id": "x", "company": {"name": "Nicks Wine Merchants"}}], "defaultAddress": None}}
         with mock.patch.object(entry.shop, "graphql", return_value=contact):
-            with self.assertRaises(ShopifyError) as caught:
-                entry.shop.get_customer(CUSTOMER)
-        self.assertIn("company", str(caught.exception))
+            subject = entry.shop.get_customer(CUSTOMER)
+        self.assertEqual(subject["contact_of"], ["Nicks Wine Merchants"])
+        result = self.prepare(person(name="Sam Contact", contact_of=["Nicks Wine Merchants"]))
+        self.assertIn("Sam Contact's personal account, not the Nicks Wine Merchants company account", result["text"])
+        self.assertIn("price list and payment terms do not apply", result["text"])
+        self.assertEqual(self.last_input["purchasingEntity"], {"customerId": CUSTOMER})       # no company, so normal prices
+
+    def test_an_ordinary_individual_gets_no_personal_account_warning(self):
+        self.assertNotIn("personal account", self.prepare()["text"])
+
+    def test_the_personal_account_order_is_created_for_a_company_contact(self):
+        prepared = self.prepare(person(name="Sam Contact", contact_of=["Nicks Wine Merchants"]))["proposal"]
+        proposal = {"token": "orders-20260922-0900-ef56-v1", "kind": prepared["kind"], "items": prepared["items"], "payload": prepared["payload"]}
+        created = []
+        approver = {"id": "U1", "user_id": "twl:jimmy-shore", "name": "Jimmy Shore", "roles": ["orders.use", "orders.approve"]}
+        with mock.patch.object(authorization, "get_authz_config", return_value=USERS), \
+             mock.patch.object(authorization, "get_order_entry_channels", return_value=frozenset({"C0SALES"})), \
+             mock.patch.object(entry.shop, "find_draft_by_tag", return_value=None), \
+             mock.patch.object(entry.shop, "get_customer", return_value=person(name="Sam Contact", contact_of=["Nicks Wine Merchants"])), \
+             mock.patch.object(entry.shop, "calculate", side_effect=lambda i: priced([{"variant_id": x["variantId"], "quantity": x["quantity"], "discount": None} for x in i["lineItems"]])), \
+             mock.patch.object(entry.shop, "create_draft", side_effect=lambda i: created.append(i) or {"id": "gid://shopify/DraftOrder/8"}), \
+             mock.patch.object(entry.shop, "complete_draft", return_value={"id": "gid://shopify/Order/3", "name": "#2002", "legacyResourceId": "3"}), \
+             mock.patch.object(entry, "admin_order_url", side_effect=lambda legacy: f"https://admin.example/orders/{legacy}"):
+            result = entry.execute(approver, {"id": "slack:C0SALES:1.1", "source": "slack", "visibility": "channel"}, "create_paid", proposal, "r1")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(created[0]["purchasingEntity"], {"customerId": CUSTOMER})
 
     def test_search_leaves_company_contacts_out_of_the_individuals(self):
         people = {"customers": {"nodes": [
@@ -497,12 +520,24 @@ class IndividualCustomerTests(unittest.TestCase):
             found = entry.shop.find_customers("nobody")
         self.assertIn("can't be created", found["note"])
 
-    def test_search_terms_are_stripped_of_shopify_filter_syntax(self):
+    def test_a_name_search_cannot_carry_shopify_filter_syntax(self):
         with mock.patch.object(entry.shop, "graphql", side_effect=[{"companies": {"nodes": []}}, {"customers": {"nodes": []}}]) as graphql:
-            entry.shop.find_customers("email:jane@example.com")
-        sent = graphql.call_args_list[0].args[1]["query"]
-        self.assertNotIn(":", sent)
-        self.assertNotIn("@", sent)
+            entry.shop.find_customers("tag:vip OR total_spent:>1000 nicks")
+        for call in graphql.call_args_list:
+            sent = call.args[1]["query"]
+            self.assertNotIn(":", sent)
+            self.assertNotIn(">", sent)
+
+    def test_an_email_can_only_ever_send_that_address_in_a_fixed_email_filter(self):
+        for typed in ("jane@example.com", "JANE@Example.COM", 'x" OR email:* jane@example.com', "email:jane@example.com company account"):
+            with mock.patch.object(entry.shop, "graphql", return_value={"customers": {"nodes": []}}) as graphql:
+                entry.shop.find_customers(typed)
+            self.assertEqual(graphql.call_count, 1, typed)
+            self.assertEqual(graphql.call_args.args[1], {"query": 'email:"jane@example.com"'}, typed)
+        # Characters that could break out of the filter never form an address at all.
+        with mock.patch.object(entry.shop, "graphql", side_effect=[{"companies": {"nodes": []}}, {"customers": {"nodes": []}}]) as graphql:
+            entry.shop.find_customers('"@evil.com OR email:*')
+        self.assertNotIn("email:", graphql.call_args_list[0].args[1]["query"])
 
     def test_execute_creates_the_order_for_an_individual(self):
         prepared = self.prepare()["proposal"]
@@ -594,6 +629,94 @@ class CustomerLookupTests(unittest.TestCase):
         text = str(found)
         for private in ("@", "phone", "address", "email"):
             self.assertNotIn(private, text.lower())
+
+
+def email_node(cid, name, email, companies=()):
+    return {
+        "id": f"gid://shopify/Customer/{cid}", "displayName": name, "defaultEmailAddress": {"emailAddress": email},
+        "companyContactProfiles": [
+            {"id": f"gid://shopify/CompanyContact/{cid}{n}",
+             "company": {"id": f"gid://shopify/Company/{c}", "name": c_name,
+                         "locations": {"nodes": [{"id": f"gid://shopify/CompanyLocation/{c}{k}", "name": f"{c_name} {k}"} for k in range(locs)]}}}
+            for n, (c, c_name, locs) in enumerate(companies)
+        ],
+    }
+
+
+class EmailLookupTests(unittest.TestCase):
+    """Find a customer by email address. Shopify's own email search is loose, so it is matched exactly here."""
+
+    def find(self, typed, nodes):
+        with mock.patch.object(entry.shop, "graphql", return_value={"customers": {"nodes": nodes}}):
+            return entry.shop.find_customers(typed)
+
+    def similar(self):
+        # What Shopify really returned for chris@thewhiskylist.com.au: lookalikes with + addressing.
+        return [
+            email_node(1, "Chris Ross", "chris@thewhiskylist.com.au", [(10, "The Whisky List", 1)]),
+            email_node(2, "Chris Ross", "chris+1@thewhiskylist.com.au"),
+            email_node(3, "Toby Axford", "chris+2@thewhiskylist.com.au"),
+            email_node(4, "FBA: Harvie Mae PTY LTD", "chris+3@thewhiskylist.com.au"),
+        ]
+
+    def test_only_the_exact_address_is_used_never_the_lookalikes(self):
+        found = self.find("chris@thewhiskylist.com.au", self.similar())
+        text = str(found)
+        for stranger in ("Toby Axford", "Harvie Mae", "chris+"):
+            self.assertNotIn(stranger, text)
+        self.assertEqual({a["account"] for a in found["accounts"]}, {"company", "personal"})
+        self.assertEqual(next(a for a in found["accounts"] if a["account"] == "personal")["customer_id"], "gid://shopify/Customer/1")
+
+    def test_a_company_contact_gets_both_a_company_and_a_personal_account(self):
+        found = self.find("chris@thewhiskylist.com.au", self.similar())
+        company = next(a for a in found["accounts"] if a["account"] == "company")
+        self.assertEqual(company["name"], "The Whisky List")
+        self.assertEqual(company["company_id"], "gid://shopify/Company/10")
+        self.assertEqual(len(company["locations"]), 1)
+        self.assertIn("company account", found["note"])
+        self.assertIn("personal account", found["note"])
+        self.assertIn("Otherwise ask", found["note"])
+
+    def test_someone_who_is_not_a_company_contact_has_just_a_personal_account(self):
+        found = self.find("pat@example.com", [email_node(7, "Pat Example", "pat@example.com")])
+        self.assertEqual([a["account"] for a in found["accounts"]], ["personal"])
+        self.assertIn("no company account", found["note"])
+        self.assertIn("Use it", found["note"])
+
+    def test_a_contact_at_two_companies_lists_both(self):
+        found = self.find("sam@example.com", [email_node(8, "Sam", "sam@example.com", [(20, "Nicks Wine Merchants", 1), (21, "Cellarbrations", 2)])])
+        companies = [a for a in found["accounts"] if a["account"] == "company"]
+        self.assertEqual([c["name"] for c in companies], ["Nicks Wine Merchants", "Cellarbrations"])
+        self.assertEqual(len(companies[1]["locations"]), 2)
+        self.assertIn("Nicks Wine Merchants and Cellarbrations", found["note"])
+
+    def test_no_exact_address_finds_nobody_and_leaks_nothing(self):
+        found = self.find("chris@thewhiskylist.com.au", self.similar()[1:])
+        self.assertEqual(found["accounts"], [])
+        self.assertIn("No customer has exactly that email address", found["note"])
+        for stranger in ("Toby Axford", "Harvie Mae", "chris+"):
+            self.assertNotIn(stranger, str(found))
+
+    def test_case_and_surrounding_words_do_not_matter(self):
+        for typed in ("CHRIS@TheWhiskyList.com.au", "chris@thewhiskylist.com.au company account", "  order for Chris@thewhiskylist.com.au (personal)  "):
+            found = self.find(typed, self.similar())
+            self.assertEqual(len(found["accounts"]), 2, typed)
+
+    def test_the_email_is_never_returned(self):
+        found = self.find("chris@thewhiskylist.com.au", self.similar())
+        self.assertNotIn("@", str(found))
+        self.assertNotIn("thewhiskylist.com.au", str(found))
+
+    def test_a_typed_address_is_not_mistaken_for_a_different_one(self):
+        # A near miss on the address must not resolve to the person.
+        nodes = [email_node(1, "Chris Ross", "chris@thewhiskylist.com.au", [(10, "The Whisky List", 1)])]
+        for typed in ("chris@thewhiskylist.com", "chri@thewhiskylist.com.au", "chris@thewhiskylist.co.au", "hris@thewhiskylist.com.au"):
+            self.assertEqual(self.find(typed, nodes)["accounts"], [], typed)
+
+    def test_a_name_without_an_at_sign_still_searches_by_name(self):
+        with mock.patch.object(entry.shop, "graphql", side_effect=[{"companies": {"nodes": []}}, {"customers": {"nodes": []}}]) as graphql:
+            entry.shop.find_customers("chris thewhiskylist")
+        self.assertEqual(graphql.call_count, 2)
 
 
 class ToolTests(unittest.TestCase):
