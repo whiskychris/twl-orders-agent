@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-from . import entry
+from . import entry, product_pick
 from .authorization import ORDER_ENTRY, audit_tool
 from .sources import draft_orders, shopify
 
@@ -329,22 +329,22 @@ def build_server(ctx, state=None):
             return await call(
                 "find_variant",
                 ORDER_ENTRY,
-                draft_orders.find_variants,
+                product_pick.find_for_order,
                 args.get("query", ""),
-                limit=args.get("limit", 10),
                 include_inventory=ctx.has("inventory"),
             )
 
         add(
             "find_variant",
-            "Find the product variant to order, by SKU or name (for example sku:AH10 or a product name). "
-            "Returns variant_id, product, variant, SKU and status. If more than one could be meant "
-            "(different sizes or bottlings), ask which. Prices come from the draft, not from here.",
+            "Find the product to order from what the user typed (for example 'Arran 10' or 'Ardnahoe "
+            "Bholsa'). TWL's rules choose, not you. The answer has a `decision`: 'use' means one clear winner "
+            "(use its variant_id and tell the user which product you chose); 'ask' means several plausible "
+            "products (list the numbered options and ask which, and never pick for them); 'none' means nothing "
+            "orderable matched (say so, and mention anything in `unavailable`, such as out of stock). Samples, "
+            "gift packs, bottle splits and out-of-stock products are never offered. Use only variant_ids this "
+            "tool returned. Search by name: SKUs are not usable.",
             _schema(
-                {
-                    "query": {**STRING, "description": "A SKU or part of the product name."},
-                    "limit": {**INTEGER, "description": "How many, 1 to 20. Default 10."},
-                },
+                {"query": {**STRING, "description": "The product as the user named it, for example 'Arran 10'."}},
                 required=["query"],
             ),
             find_variant,

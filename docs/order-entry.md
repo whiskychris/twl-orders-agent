@@ -7,7 +7,7 @@ because not every customer is set up as a company. Smith prepares a draft, posts
 after someone with approval rights presses a button is the order created in Shopify.
 
 ```
-"orders: new order for Nicks Wine Merchants: 6 x AH10, 12 x sku:GA12 with 10% off"
+"orders: new order for Nicks Wine Merchants: 6 x Arran 10, 12 x GlenAllachie 12 with 10% off"
    -> draft (priced by Shopify, posted with three buttons)
    -> [Create order (invoiced, paid)] [Create order (not invoiced, unpaid)] [Cancel]
    -> "Order #1234 is marked as paid (invoiced). Open #1234 in Shopify" (with a link)

@@ -21,7 +21,7 @@ routing. This service implements the gateway's agent contract v1 and stays state
 | "How many Ardnahoe do we have?" | `search_products`, `get_inventory` |
 | "What's running low?" | `low_stock` |
 | "Has Jane Smith ordered before?" (restricted) | `search_customers` |
-| "New order for Nicks Wine Merchants: 6 x AH10, 10% off" (needs approval) | `find_customer`, `find_variant`, `prepare_draft_order` |
+| "New order for Nicks Wine Merchants: 6 x Arran 10, 10% off" (needs approval) | `find_customer`, `find_variant`, `prepare_draft_order` |
 
 ## Who can see what
 The gateway proves who is asking and passes a stable `user_id` (for example `twl:chris-ross`) with the

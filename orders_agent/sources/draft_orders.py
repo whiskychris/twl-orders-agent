@@ -3,7 +3,7 @@
 Fixed GraphQL operations, validated against Shopify's Admin schema. The model never sends GraphQL.
 
 Two kinds of function live here, and the split matters:
-- Reading and previewing (find_companies, find_variants, get_location, calculate): used by the
+- Reading and previewing (find_companies, find_customers, get_location, calculate): used by the
   model's tools. `draftOrderCalculate` is a mutation in Shopify's schema, but it only calculates
   totals and tax and saves nothing.
 - Writing (find_draft_by_tag, create_draft, complete_draft): called ONLY from entry.execute, which
@@ -51,22 +51,6 @@ query Customer($id: ID!) {
     displayName
     companyContactProfiles { id }
     defaultAddress { address1 address2 city provinceCode zip countryCodeV2 company firstName lastName phone }
-  }
-}
-"""
-
-FIND_VARIANTS = """
-query FindVariants($query: String!, $first: Int!, $withInventory: Boolean!) {
-  productVariants(first: $first, query: $query) {
-    nodes {
-      id
-      sku
-      title
-      displayName
-      inventoryQuantity @include(if: $withInventory)
-      inventoryPolicy
-      product { title status }
-    }
   }
 }
 """
@@ -239,31 +223,6 @@ def find_customers(query, limit=5):
             None if matches else "No existing customer found. New customers can't be created here."
         ),
     }
-
-
-def find_variants(query, limit=10, include_inventory=False):
-    """Product variants matching a SKU or title. Selling prices are not returned here: the draft order
-    is priced by Shopify for the customer's company (its own price list)."""
-    term = str(query or "").strip()[:160]
-    if not term:
-        raise ShopifyError("Give me a SKU or product name to look for.")
-    data = graphql(
-        FIND_VARIANTS,
-        {"query": term, "first": clamp(limit, 1, 20, 10), "withInventory": bool(include_inventory)},
-    )
-    rows = []
-    for node in _nodes(data.get("productVariants")):
-        row = {
-            "variant_id": node["id"],
-            "product": (node.get("product") or {}).get("title"),
-            "variant": node.get("title"),
-            "sku": node.get("sku"),
-            "status": (node.get("product") or {}).get("status"),
-        }
-        if include_inventory:
-            row["in_stock"] = node.get("inventoryQuantity")
-        rows.append(row)
-    return {"variants": rows}
 
 
 def get_variants(ids, include_inventory=False):

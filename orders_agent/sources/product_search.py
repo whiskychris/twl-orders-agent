@@ -1,0 +1,169 @@
+"""Product lookups for order entry: candidates with everything needed to rank them.
+
+Read-only, fixed GraphQL validated against Shopify's Admin schema. One query returns each product's
+status, vendor, tags, stock, variants, and whether it is in the priority collections and published to the
+priority catalogs (Our Brands, Trade Core, and so on, named in data/product_priority.json).
+
+The collection and catalog NAMES in the config are resolved to ids here, and cached for an hour. If a name
+can't be found (renamed or deleted in Shopify), this raises instead of ranking without it: silently
+dropping a tier would make the ranking wrong in a way nobody would notice.
+"""
+
+import re
+import time
+
+from .shopify import ShopifyError, clamp, graphql
+
+SOURCES_TTL = 3600
+_sources = {"value": None, "loaded_at": 0.0}
+
+SOURCES = """
+query Sources($collections: String!) {
+  collections(first: 20, query: $collections) { nodes { id title } }
+  catalogs(first: 50) { nodes { title publication { id } } }
+}
+"""
+
+CANDIDATES = """
+query ProductCandidates(
+  $query: String!, $first: Int!,
+  $ourBrands: ID!, $ibCollection: ID!, $specialCollection: ID!,
+  $tradeCore: ID!, $tradeIbs: ID!, $tradeSpecial: ID!
+) {
+  products(first: $first, query: $query, sortKey: RELEVANCE) {
+    nodes {
+      id
+      title
+      handle
+      status
+      vendor
+      productType
+      tags
+      totalInventory
+      inOurBrands: inCollection(id: $ourBrands)
+      inIbCollection: inCollection(id: $ibCollection)
+      inSpecialCollection: inCollection(id: $specialCollection)
+      inTradeCore: publishedOnPublication(publicationId: $tradeCore)
+      inTradeIbs: publishedOnPublication(publicationId: $tradeIbs)
+      inTradeSpecial: publishedOnPublication(publicationId: $tradeSpecial)
+      variants(first: 20) { nodes { id title sku inventoryQuantity } }
+    }
+  }
+}
+"""
+
+
+def _nodes(connection):
+    return (connection or {}).get("nodes") or []
+
+
+def resolve_sources(config):
+    """Collection and catalog ids for tiers 1 to 3, by the names in the config. Cached."""
+    now = time.time()
+    if _sources["value"] is not None and now - _sources["loaded_at"] < SOURCES_TTL:
+        return _sources["value"]
+
+    tiers = config["tiers"]
+    wanted_collections = [tiers[n]["collection"] for n in ("1", "2", "3")]
+    wanted_catalogs = [tiers[n]["catalog"] for n in ("1", "2", "3")]
+    search = " OR ".join(f"title:'{title}'" for title in wanted_collections)
+    data = graphql(SOURCES, {"collections": search})
+
+    by_title = {}
+    for node in _nodes(data.get("collections")):
+        by_title.setdefault(node["title"], []).append(node["id"])
+    catalogs = {}
+    for node in _nodes(data.get("catalogs")):
+        publication = (node.get("publication") or {}).get("id")
+        if publication:
+            catalogs.setdefault(node["title"], []).append(publication)
+
+    problems = []
+    ids = {}
+    for label, wanted, found in (("collection", wanted_collections, by_title), ("catalog", wanted_catalogs, catalogs)):
+        for name in wanted:
+            matches = found.get(name, [])
+            if len(matches) != 1:
+                problems.append(f"the {label} '{name}' ({'not found' if not matches else 'found more than once'})")
+            else:
+                ids[(label, name)] = matches[0]
+    if problems:
+        raise ShopifyError(
+            "Product picking isn't set up right: " + "; ".join(problems) + ". Someone needs to check the "
+            "names in orders_agent/data/product_priority.json against Shopify. Nothing was guessed."
+        )
+
+    value = {
+        "ourBrands": ids[("collection", tiers["1"]["collection"])],
+        "ibCollection": ids[("collection", tiers["2"]["collection"])],
+        "specialCollection": ids[("collection", tiers["3"]["collection"])],
+        "tradeCore": ids[("catalog", tiers["1"]["catalog"])],
+        "tradeIbs": ids[("catalog", tiers["2"]["catalog"])],
+        "tradeSpecial": ids[("catalog", tiers["3"]["catalog"])],
+    }
+    _sources["value"], _sources["loaded_at"] = value, now
+    return value
+
+
+def clear_cache():
+    _sources["value"], _sources["loaded_at"] = None, 0.0
+
+
+def _product(node):
+    return {
+        "id": node["id"],
+        "title": node["title"],
+        "handle": node["handle"],
+        "status": node.get("status"),
+        "vendor": node.get("vendor") or "",
+        "tags": list(node.get("tags") or []),
+        "flags": {
+            "our_brands": bool(node.get("inOurBrands")),
+            "ib_collection": bool(node.get("inIbCollection")),
+            "special_collection": bool(node.get("inSpecialCollection")),
+            "trade_core": bool(node.get("inTradeCore")),
+            "trade_ibs": bool(node.get("inTradeIbs")),
+            "trade_special": bool(node.get("inTradeSpecial")),
+        },
+        "variants": [
+            {
+                "id": variant["id"],
+                "title": variant.get("title") or "",
+                "sku": variant.get("sku") or "",
+                "stock": variant.get("inventoryQuantity") or 0,
+            }
+            for variant in _nodes(node.get("variants"))
+        ],
+    }
+
+
+def search(config, shopify_query, limit=50):
+    """Products matching a Shopify search string, with ranking data. Most relevant first."""
+    variables = {"query": shopify_query, "first": clamp(limit, 1, 100, 50), **resolve_sources(config)}
+    data = graphql(CANDIDATES, variables)
+    return [_product(node) for node in _nodes(data.get("products"))]
+
+
+_SAFE_TOKEN = re.compile(r"[^a-z0-9]")
+
+
+def title_query(tokens, in_stock=True):
+    """A Shopify search for products whose title contains every token. Tokens are reduced to letters and
+    digits, so nothing a user types can add a search filter of its own."""
+    parts = []
+    for token in tokens:
+        clean = _SAFE_TOKEN.sub("", token.lower())
+        if clean:
+            parts.append(f"title:*{clean}*")
+    if not parts:
+        raise ShopifyError("Give me a product name to look for.")
+    parts.append("status:active")
+    if in_stock:
+        parts.append("inventory_total:>0")
+    return " AND ".join(parts)
+
+
+def handles_query(handles):
+    """A Shopify search for products with these handles (from the quick order list)."""
+    clean = [re.sub(r"[^a-z0-9-]", "", handle.lower()) for handle in handles]
+    return " OR ".join(f"handle:{handle}" for handle in clean if handle)
