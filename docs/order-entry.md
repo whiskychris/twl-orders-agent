@@ -39,9 +39,10 @@ shows only the company and location name.
 3. **Pricing is the customer's own.** For a company, the order is raised for the company, location and its main
    contact, so Shopify applies that company's price list and tax. For an individual it is raised for the
    customer at normal prices. Addresses go straight back to Shopify and never reach the model. A person who is
-   a contact at a company can't be ordered as an individual, because that would skip the company's prices and
-   terms: the search leaves them out and the order has to go through the company. A customer with no delivery
-   address on file gets a warning on the draft, not a refusal.
+   a contact at a company is left out of name searches as an individual, so nobody skips the company's prices
+   and terms by accident. They are offered by **email address** instead (see below), where the personal account
+   is an explicit choice and the draft warns about it. A customer with no delivery address on file gets a
+   warning on the draft, not a refusal.
 4. **Discounts are verified.** Shopify's preview must show the discount as intended (a per-unit dollar
    amount is sent as the whole-line amount, then checked). If it doesn't match, the draft is refused, never
    quietly created wrong.
