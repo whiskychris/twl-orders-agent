@@ -1,10 +1,10 @@
 # Shopify access
 
-The agent reads Shopify through the Admin GraphQL API with a **read-only** app.
+The agent reads Shopify through the Admin GraphQL API, and (for order entry only) creates approved orders.
 
 ## Create the app
 Create an app in the Shopify admin for the TWL store (Dev Dashboard app, or a custom app if your store
-still offers them), install it on the store, and grant only these **read** scopes:
+still offers them), install it on the store, and grant only these scopes:
 
 | Scope | Why |
 |---|---|
@@ -15,8 +15,13 @@ still offers them), install it on the store, and grant only these **read** scope
 | `read_customers` | customers. Customer data is only shown to users with the `customers` capability, in a DM (see `docs/authorization.md`) |
 | `read_assigned_fulfillment_orders`, `read_merchant_managed_fulfillment_orders`, `read_third_party_fulfillment_orders` | fulfilments and tracking on an order |
 
-No write scopes. If a write scope is ever added to the app, this agent still has no tool that uses it, but
-remove it anyway.
+| `read_companies` | B2B companies, locations and contacts, for order entry |
+| `read_draft_orders` | finding an existing draft order, so a repeated approval never makes two |
+| `write_draft_orders` | pricing a draft (nothing saved) and, after approval only, creating and completing it |
+
+`write_draft_orders` is the only write scope. No model tool can use it: it is called only from
+`orders_agent/entry.py` in `/v1/act`, after a person with the approve role presses a button
+(`docs/order-entry.md`). Never add other write scopes without a matching, approval-gated code path.
 
 ## Credentials
 Store them in Secret Manager as `twl-shopify-config`, either:
