@@ -17,6 +17,7 @@ still offers them), install it on the store, and grant only these scopes:
 
 | `read_companies` | B2B companies, locations and contacts, for order entry |
 | `read_draft_orders` | finding an existing draft order, so a repeated approval never makes two |
+| `read_publications` | which catalogs (Trade Core, Trade IBs, Trade Special Releases) a product is published to, for product picking |
 | `write_draft_orders` | pricing a draft (nothing saved) and, after approval only, creating and completing it |
 
 `write_draft_orders` is the only write scope. No model tool can use it: it is called only from

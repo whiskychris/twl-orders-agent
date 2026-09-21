@@ -71,7 +71,7 @@ is yours.
 
 ## Shopify setup
 The app needs these extra scopes (already listed in `shopify.app.toml`): `read_companies`,
-`read_draft_orders`, `write_draft_orders`. Update the app's scopes with the Shopify CLI
+`read_draft_orders`, `write_draft_orders` and `read_publications` (product picking reads catalog membership). Update the app's scopes with the Shopify CLI
 (`shopify app deploy`) and approve the new access in the store admin. Until then the tools fail with a
 clear message and nothing is created.
 

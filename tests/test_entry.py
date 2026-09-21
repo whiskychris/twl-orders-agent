@@ -489,7 +489,7 @@ class IndividualCustomerTests(unittest.TestCase):
             found = entry.shop.find_customers("pat")
         self.assertEqual([p["name"] for p in found["individual_customers"]], ["Pat Example"])
         self.assertEqual(found["companies"][0]["name"], "Nicks")
-        self.assertEqual(set(found["individual_customers"][0]), {"customer_id", "name"})   # nothing else leaves
+        self.assertEqual(set(found["individual_customers"][0]), {"customer_id", "name", "exact_name_match"})   # nothing else leaves
         self.assertIn("More than one", found["note"])
 
     def test_search_never_returns_contact_details(self):
@@ -521,6 +521,79 @@ class IndividualCustomerTests(unittest.TestCase):
         self.assertIn("Pat Example", result["text"])
         self.assertEqual(created[0]["purchasingEntity"], {"customerId": CUSTOMER})
         self.assertEqual(created[0]["paymentTerms"], {"paymentTermsTemplateId": TERMS["id"]})
+
+
+def company_node(cid, name, locations=1):
+    return {"id": f"gid://shopify/Company/{cid}", "name": name, "mainContact": {"id": "c"}, "contacts": {"nodes": []},
+            "locations": {"nodes": [{"id": f"gid://shopify/CompanyLocation/{cid}{n}", "name": f"{name} {n}"} for n in range(locations)]}}
+
+
+def person_node(cid, name):
+    return {"id": f"gid://shopify/Customer/{cid}", "displayName": name, "companyContactProfiles": []}
+
+
+class CustomerLookupTests(unittest.TestCase):
+    """Shopify's company search is loose. An exact name should win."""
+
+    def find(self, query, companies, people):
+        answers = [{"companies": {"nodes": companies}}, {"customers": {"nodes": people}}]
+        with mock.patch.object(entry.shop, "graphql", side_effect=answers):
+            return entry.shop.find_customers(query)
+
+    def test_the_whisky_list_is_found_among_its_lookalikes(self):
+        # What happened in #sales: four companies and some individuals came back.
+        found = self.find(
+            "The Whisky List",
+            [company_node(2, "The Whisky Company"), company_node(1, "The Whisky List"), company_node(3, "The Whisky Club"), company_node(4, "The Whisky Experience")],
+            [person_node(9, "Whisky Lister")],
+        )
+        self.assertEqual([c["name"] for c in found["companies"]][0], "The Whisky List")           # the exact match goes first
+        self.assertEqual(sum(c["exact_name_match"] for c in found["companies"]), 1)
+        self.assertEqual(found["exact_match"]["name"], "The Whisky List")
+        self.assertEqual(found["exact_match"]["company_id"], "gid://shopify/Company/1")
+        self.assertEqual(found["exact_match"]["location_id"], "gid://shopify/CompanyLocation/10")  # ready to use
+        self.assertIn("Use it, and say which you chose", found["note"])
+
+    def test_matching_ignores_case_punctuation_and_spacing(self):
+        for typed in ("the whisky list", "The  Whisky   List", "THE WHISKY LIST.", "the whisky-list"):
+            found = self.find(typed, [company_node(1, "The Whisky List"), company_node(2, "The Whisky Club")], [])
+            self.assertEqual(found["exact_match"]["name"], "The Whisky List", typed)
+
+    def test_an_exact_company_with_several_locations_asks_which_location(self):
+        found = self.find("Single Malt Whisky Club", [company_node(5, "Single Malt Whisky Club", locations=2), company_node(6, "Single Malt Club")], [])
+        self.assertEqual(found["exact_match"]["name"], "Single Malt Whisky Club")
+        self.assertNotIn("location_id", found["exact_match"])
+        self.assertIn("Ask which location", found["note"])
+
+    def test_an_exact_individual_is_recognised(self):
+        found = self.find("Pat Example", [company_node(7, "Pat Example Wines")], [person_node(3, "Pat Example"), person_node(4, "Patricia Examples")])
+        self.assertEqual(found["exact_match"], {"name": "Pat Example", "kind": "individual"})
+        self.assertEqual(found["individual_customers"][0]["name"], "Pat Example")
+
+    def test_two_customers_with_exactly_the_same_name_ask(self):
+        found = self.find("Nicks Wine", [company_node(8, "Nicks Wine")], [person_node(5, "Nicks Wine")])
+        self.assertNotIn("exact_match", found)
+        self.assertIn("More than one customer has exactly this name", found["note"])
+
+    def test_no_exact_name_among_several_asks(self):
+        found = self.find("Whisky", [company_node(1, "The Whisky List"), company_node(2, "The Whisky Club")], [])
+        self.assertNotIn("exact_match", found)
+        self.assertIn("none with exactly that name", found["note"])
+
+    def test_a_single_similar_match_is_not_treated_as_exact(self):
+        found = self.find("Whisky Lst", [company_node(1, "The Whisky List")], [])
+        self.assertNotIn("exact_match", found)
+        self.assertIsNone(found["note"])          # one match, nothing to ask: the caller decides
+
+    def test_nothing_found(self):
+        found = self.find("Nobody Ltd", [], [])
+        self.assertIn("can't be created", found["note"])
+
+    def test_exact_matching_never_exposes_contact_details(self):
+        found = self.find("The Whisky List", [company_node(1, "The Whisky List")], [person_node(9, "The Whisky List")])
+        text = str(found)
+        for private in ("@", "phone", "address", "email"):
+            self.assertNotIn(private, text.lower())
 
 
 class ToolTests(unittest.TestCase):

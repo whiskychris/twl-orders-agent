@@ -128,10 +128,13 @@ def graphql(query, variables=None):
                 if throttled and attempt < MAX_RETRIES:
                     time.sleep(2 * (attempt + 1))
                     continue
-                messages = "; ".join(
+                # The same problem is often reported once per item (14 products, 14 identical
+                # messages). Say each distinct message once.
+                distinct = list(dict.fromkeys(
                     str(error.get("message", error)) if isinstance(error, dict) else str(error)
                     for error in errors
-                )
+                ))
+                messages = "; ".join(distinct)
             else:
                 messages = str(errors)
             raise ShopifyError(f"Shopify error: {messages[:500]}")

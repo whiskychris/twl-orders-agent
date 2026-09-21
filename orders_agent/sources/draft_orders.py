@@ -18,6 +18,7 @@ is not used.
 """
 
 import re
+import unicodedata
 from decimal import Decimal, InvalidOperation
 
 from .shopify import ShopifyError, clamp, graphql
@@ -173,6 +174,12 @@ def _user_errors(payload, what):
         raise ShopifyError(f"Shopify would not {what}: {messages[:400]}")
 
 
+def _name_key(text):
+    """A name reduced for comparing: lower case, accents folded, punctuation and spacing ignored."""
+    folded = unicodedata.normalize("NFKD", str(text or "")).encode("ascii", "ignore").decode().lower()
+    return " ".join(re.findall(r"[a-z0-9]+", folded))
+
+
 def _clean_search(text, limit=120):
     """Search terms only. Shopify filter syntax (field:value) is stripped so a company search can't be
     turned into a search of some other field."""
@@ -220,14 +227,47 @@ def find_customers(query, limit=5):
         for node in _nodes(data.get("customers"))
         if not node.get("companyContactProfiles")
     ]
+    # Shopify's company search is loose: "The Whisky List" also finds The Whisky Company, The Whisky Club and
+    # so on. If exactly one customer has exactly the name typed, that is the one, and it goes first.
+    wanted = _name_key(term)
+    for company in companies:
+        company["exact_name_match"] = _name_key(company["name"]) == wanted
+    for person in people:
+        person["exact_name_match"] = _name_key(person["name"]) == wanted
+    companies.sort(key=lambda c: not c["exact_name_match"])
+    people.sort(key=lambda p: not p["exact_name_match"])
+    exact = [c for c in companies if c["exact_name_match"]] + [p for p in people if p["exact_name_match"]]
+
     matches = len(companies) + len(people)
-    return {
-        "companies": companies,
-        "individual_customers": people,
-        "note": "More than one match. Ask which is meant." if matches > 1 else (
-            None if matches else "No existing customer found. New customers can't be created here."
-        ),
-    }
+    result = {"companies": companies, "individual_customers": people, "note": None}
+    if not matches:
+        result["note"] = "No existing customer found. New customers can't be created here."
+    elif len(exact) == 1:
+        only = exact[0]
+        result["exact_match"] = {"name": only["name"], "kind": "company" if "company_id" in only else "individual"}
+        if "company_id" in only:
+            locations = only["locations"]
+            if len(locations) == 1:
+                result["exact_match"].update(company_id=only["company_id"], location_id=locations[0]["location_id"])
+                result["note"] = (
+                    f"Exactly one customer is named '{only['name']}' (a company with one location). Use it, and say "
+                    "which you chose. The other matches are only similar names."
+                )
+            else:
+                result["note"] = (
+                    f"Exactly one customer is named '{only['name']}', but it has {len(locations)} locations. Ask which "
+                    "location is meant."
+                )
+        else:
+            result["note"] = (
+                f"Exactly one customer is named '{only['name']}' (an individual). Use it, and say which you chose. "
+                "The other matches are only similar names."
+            )
+    elif len(exact) > 1:
+        result["note"] = "More than one customer has exactly this name. Ask which is meant."
+    elif matches > 1:
+        result["note"] = "More than one match, none with exactly that name. Ask which is meant."
+    return result
 
 
 def get_variants(ids):
