@@ -96,6 +96,15 @@ class CustomerVisibilityTests(unittest.TestCase):
         self.assertTrue(ctx.has("orders"))
         self.assertIn("shared channel", ctx.describe())
 
+    def test_the_model_is_told_where_the_conversation_is(self):
+        with with_users():
+            dm = resolve_context(user("twl:chris-ross"), convo("dm"), "r1").describe()
+            channel = resolve_context(user("twl:chris-ross"), convo("channel"), "r1").describe()
+        self.assertIn("This conversation is a direct message.", dm)
+        self.assertNotIn("withheld", dm)
+        self.assertIn("This conversation is a shared channel.", channel)
+        self.assertIn("withheld", channel)
+
     def test_unclear_visibility_is_treated_as_a_channel(self):
         with with_users():
             for visibility in (None, "", "public", 5):

@@ -64,7 +64,8 @@ class AuthContext:
         limit anything. The tools and queries are what enforce access."""
         can = ", ".join(sorted(self.capabilities)) or "nothing"
         cannot = [c for c in CAPABILITIES if c not in self.capabilities]
-        text = f"Access for this user: can see {can}."
+        where = "a direct message" if self.visibility == "dm" else "a shared channel"
+        text = f"This conversation is {where}. Access for this user: can see {can}."
         if cannot:
             text += " Cannot see: " + ", ".join(cannot) + "."
         if "customers" in self.withheld:
