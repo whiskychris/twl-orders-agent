@@ -138,15 +138,17 @@ class OrderEntryAuthorizationTests(unittest.TestCase):
         self.assertTrue(ctx.has("order_entry"))
         self.assertTrue(ctx.has("customers"))
 
-    def test_order_entry_works_in_a_listed_channel_but_customers_are_still_withheld(self):
+    def test_order_entry_and_customers_both_work_in_a_listed_channel(self):
+        # order_entry_channels (for example #sales) now gates customer visibility too, the same
+        # allowlist reused rather than a second one - see authorization.resolve_context.
         ctx = self.resolve("twl:jimmy", {"id": "slack:C0SALES:1.1", "source": "slack", "visibility": "channel"})
         self.assertTrue(ctx.has("order_entry"))
-        self.assertFalse(ctx.has("customers"))
-        self.assertEqual(ctx.withheld, ("customers",))
+        self.assertTrue(ctx.has("customers"))
+        self.assertEqual(ctx.withheld, ())
         self.assertEqual(ctx.channel_id, "C0SALES")
         self.assertIn("prepare new orders", ctx.describe())
 
-    def test_order_entry_is_withheld_in_any_other_channel(self):
+    def test_order_entry_and_customers_are_both_withheld_in_any_other_channel(self):
         for conversation in (
             {"id": "slack:C0OTHER:1.1", "source": "slack", "visibility": "channel"},
             {"id": "garbage", "source": "slack", "visibility": "channel"},
@@ -154,19 +156,22 @@ class OrderEntryAuthorizationTests(unittest.TestCase):
         ):
             ctx = self.resolve("twl:jimmy", conversation)
             self.assertFalse(ctx.has("order_entry"), conversation)
-            self.assertIn("order_entry", ctx.withheld)
+            self.assertFalse(ctx.has("customers"), conversation)
+            self.assertEqual(set(ctx.withheld), {"order_entry", "customers"}, conversation)
             self.assertIn("not available in this conversation", ctx.describe())
 
     def test_missing_visibility_is_a_channel_and_the_allowlist_still_applies(self):
         listed = self.resolve("twl:jimmy", {"id": "slack:C0SALES:1.1", "source": "slack"})
         self.assertTrue(listed.has("order_entry"))
-        self.assertFalse(listed.has("customers"))       # treated as a channel, so customers stay withheld
+        self.assertTrue(listed.has("customers"))       # treated as a channel, but it's on the allowlist
         unlisted = self.resolve("twl:jimmy", {"id": "slack:C0OTHER:1.1", "source": "slack"})
         self.assertFalse(unlisted.has("order_entry"))
+        self.assertFalse(unlisted.has("customers"))
 
     def test_no_allowlist_means_no_channels(self):
         ctx = self.resolve("twl:jimmy", {"id": "slack:C0SALES:1.1", "source": "slack", "visibility": "channel"}, channels=frozenset())
         self.assertFalse(ctx.has("order_entry"))
+        self.assertFalse(ctx.has("customers"))
 
     def test_channel_ids_are_compared_exactly(self):
         for other in ("C0SALES2", "C0SALE", "c0sales-x", "D0SALES"):
@@ -225,10 +230,16 @@ class ToolAvailabilityTests(unittest.TestCase):
              "search_products", "get_inventory", "low_stock", "search_customers"},
         )
 
-    def test_no_customer_tool_in_a_channel(self):
-        names = self.tools_for("twl:chris-ross", "channel")
+    def test_no_customer_tool_in_a_channel_not_on_the_allowlist(self):
+        names = self.tools_for("twl:chris-ross", "channel")  # "D1" here, never on order_entry_channels
         self.assertNotIn("search_customers", names)
         self.assertIn("search_orders", names)
+
+    def test_customer_tool_available_in_an_allowlisted_channel(self):
+        with with_users(), mock.patch.object(authorization, "get_order_entry_channels", return_value=frozenset({"D1"})):
+            ctx = resolve_context(user("twl:chris-ross"), convo("channel"), "r1")
+        _server, names = build_server(ctx)
+        self.assertIn("search_customers", names)
 
     def test_orders_and_products_only(self):
         self.assertEqual(
@@ -308,10 +319,16 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual(self.seen, [])
 
     def test_channel_conversation_withholds_customers(self):
-        with with_users():
+        with with_users():  # "D1" here, never on order_entry_channels
             self.post(user("twl:chris-ross"), conversation=convo("channel"))
         _prompt, ctx = self.seen[0]
         self.assertFalse(ctx.has("customers"))
+
+    def test_an_allowlisted_channel_does_not_withhold_customers(self):
+        with with_users(), mock.patch.object(authorization, "get_order_entry_channels", return_value=frozenset({"D1"})):
+            self.post(user("twl:chris-ross"), conversation=convo("channel"))
+        _prompt, ctx = self.seen[0]
+        self.assertTrue(ctx.has("customers"))
 
     def test_the_same_identity_gets_the_same_result_from_any_interface(self):
         # A different front end (source) must not change what a person can see.

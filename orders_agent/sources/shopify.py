@@ -47,6 +47,17 @@ _QUERY_TOKEN = re.compile(r'[^\s"()]+:"[^"]*"|"[^"]*"|\(|\)|[^\s()]+')
 _FILTER_TOKEN = re.compile(r"^-?([A-Za-z_]+):(\S.*)$")
 _QUERY_OPERATORS = frozenset({"AND", "OR", "NOT"})
 
+# Shopify's order search has no way to filter by the CUSTOMER's tags (only customer_id, an order's
+# own tags, and other order fields - confirmed against Shopify's own OrderConnection query filter
+# list). customer_tag: is this service's own meta-filter, never sent to Shopify: search_orders pulls
+# it out of the query, fetches customer.tags (already gated behind the customers capability, same as
+# every other customer field), and filters in code, scanning newest-first until enough matches are
+# found or the scan cap is hit. Comma means OR, matching Shopify's own tag: convention - for example
+# customer_tag:Off-Prem,On-Prem for "trade customers" (see tools.py's search_orders description).
+_CUSTOMER_TAG_TOKEN = re.compile(r'(?i)^customer_tag:(\S+)$')
+CUSTOMER_TAG_SCAN_PAGE_SIZE = 50
+CUSTOMER_TAG_SCAN_MAX_PAGES = 6  # up to 300 orders scanned
+
 _token_cache = {"token": None, "expires_at": 0.0}
 
 
@@ -166,6 +177,22 @@ def order_query_is_structured(query):
     return True
 
 
+def _extract_customer_tags(query):
+    """Pulls any customer_tag:a,b,c token out of an order search, case-insensitively. Returns
+    (remaining_query, tags-or-None). The remaining query still goes to Shopify as usual; the tags
+    are handled entirely in code (see search_orders)."""
+    tokens = _QUERY_TOKEN.findall(str(query or ""))
+    tags = None
+    kept = []
+    for token in tokens:
+        match = _CUSTOMER_TAG_TOKEN.match(token)
+        if match:
+            tags = frozenset(tag.strip().lower() for tag in match.group(1).split(",") if tag.strip())
+        else:
+            kept.append(token)
+    return " ".join(kept), tags
+
+
 def _guard(query, include_customer):
     """Refuse order searches that could reveal customers, for callers without that capability."""
     if include_customer or order_query_is_structured(query):
@@ -198,8 +225,8 @@ query ShopInfo {
 """
 
 SEARCH_ORDERS = """
-query SearchOrders($query: String!, $first: Int!, $reverse: Boolean!, $withCustomer: Boolean!) {
-  orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: $reverse) {
+query SearchOrders($query: String!, $first: Int!, $after: String, $reverse: Boolean!, $withCustomer: Boolean!) {
+  orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: $reverse) {
     nodes {
       id
       name
@@ -211,11 +238,11 @@ query SearchOrders($query: String!, $first: Int!, $reverse: Boolean!, $withCusto
       subtotalLineItemsQuantity
       sourceName
       tags
-      customer @include(if: $withCustomer) { displayName numberOfOrders }
+      customer @include(if: $withCustomer) { displayName numberOfOrders tags }
       shippingAddress @include(if: $withCustomer) { city provinceCode countryCodeV2 }
       lineItems(first: 10) { nodes { title sku quantity } }
     }
-    pageInfo { hasNextPage }
+    pageInfo { hasNextPage endCursor }
   }
 }
 """
@@ -375,6 +402,7 @@ def _order_row(node):
         row["customer"] = {
             "name": customer.get("displayName"),
             "orders": customer.get("numberOfOrders"),
+            "tags": customer.get("tags") or [],
         }
     address = node.get("shippingAddress")
     if address:
@@ -386,22 +414,72 @@ def _order_row(node):
     return row
 
 
+def _matches_customer_tags(node, tags):
+    customer_tags = {str(tag).strip().lower() for tag in (node.get("customer") or {}).get("tags") or []}
+    return bool(customer_tags & tags)
+
+
 def search_orders(query, limit=20, oldest_first=False, include_customer=False):
-    _guard(query, include_customer)
-    data = graphql(
-        SEARCH_ORDERS,
-        {
-            "query": str(query or ""),
-            "first": clamp(limit, 1, 50, 20),
-            "reverse": not oldest_first,
-            "withCustomer": include_customer,
-        },
-    )
-    connection = data["orders"]
-    return {
-        "orders": [_order_row(node) for node in connection["nodes"]],
-        "has_more": connection["pageInfo"]["hasNextPage"],
-    }
+    remaining_query, customer_tags = _extract_customer_tags(query)
+    _guard(remaining_query, include_customer)
+    first = clamp(limit, 1, 50, 20)
+
+    if customer_tags is None:
+        data = graphql(
+            SEARCH_ORDERS,
+            {"query": remaining_query, "first": first, "after": None, "reverse": not oldest_first, "withCustomer": include_customer},
+        )
+        connection = data["orders"]
+        return {
+            "orders": [_order_row(node) for node in connection["nodes"]],
+            "has_more": connection["pageInfo"]["hasNextPage"],
+        }
+
+    # customer_tag: has no Shopify equivalent, so this scans orders newest-first (or oldest-first),
+    # filtering on the customer's tags in code, until `first` matches are found or the scan cap is
+    # hit. Requires customer access - the tag is fetched the same way every other customer field is.
+    if not include_customer:
+        raise RestrictedError(
+            "Filtering by a customer's tags (for example trade customers) needs customer access, "
+            "which this user does not have."
+        )
+    matched = []
+    cursor = None
+    scanned = 0
+    truncated = False
+    for _page in range(CUSTOMER_TAG_SCAN_MAX_PAGES):
+        data = graphql(
+            SEARCH_ORDERS,
+            {
+                "query": remaining_query, "first": CUSTOMER_TAG_SCAN_PAGE_SIZE, "after": cursor,
+                "reverse": not oldest_first, "withCustomer": True,
+            },
+        )
+        connection = data["orders"]
+        nodes = connection["nodes"]
+        scanned += len(nodes)
+        for node in nodes:
+            if _matches_customer_tags(node, customer_tags):
+                matched.append(_order_row(node))
+                if len(matched) >= first:
+                    break
+        info = connection["pageInfo"]
+        if len(matched) >= first or not info["hasNextPage"]:
+            has_more = info["hasNextPage"] and len(matched) >= first
+            break
+        cursor = info["endCursor"]
+    else:
+        has_more = True
+        truncated = True
+
+    result = {"orders": matched, "has_more": has_more}
+    if truncated:
+        result["note"] = (
+            f"customer_tag matches are found by scanning orders (no direct Shopify filter for this), "
+            f"and the scan stopped after {scanned} orders without finding {first}. There may be more "
+            "further back; narrow the search (a date range, for example) to look further."
+        )
+    return result
 
 
 def get_order(order_name, include_customer=False):

@@ -13,10 +13,13 @@ Capabilities:
     orders       orders, order totals, order counts, fulfilment and tracking
     products     products and variants, including selling prices
     inventory    stock quantities and locations (also the stock figures on products)
-    customers    customer details: names, emails, phones, addresses, the order note, customer search
-    order_entry  prepare a new order for an existing customer (company), for approval. Shows only the
-                 company and location name, never emails, phones or addresses. Available in a DM and in
-                 the channels listed under "order_entry_channels" in the secret (for example #sales):
+    customers    customer details: names, emails, phones, addresses, the order note, customer search.
+                 Available in a DM and in the channels listed under "order_entry_channels" (below) -
+                 for example #sales, since that's the sales team's own channel already.
+    order_entry  prepare a new order for an existing customer (company), for approval. Its OWN draft
+                 rendering always shows only the company and location name, never emails, phones or
+                 addresses, regardless of the customers capability above. Available in a DM and in the
+                 channels listed under "order_entry_channels" in the secret (for example #sales):
 
     {"users": {...}, "order_entry_channels": ["C0123SALES"]}
 
@@ -27,9 +30,10 @@ The rules:
 - Deny by default. Not listed means no access. If the permissions cannot be read, nothing is looked up.
 - The model never decides access. Tools for a capability the user lacks are not registered, and the
   Shopify queries never request the fields (see sources/shopify.py).
-- Customer details are never shown outside a direct message, because a reply in a channel is visible
-  to everyone in it. The gateway tells us which kind of conversation this is. Anything unclear is
-  treated as a channel.
+- Customer details and order entry are never shown outside a DM or an order_entry_channels channel,
+  because a reply anywhere else is visible to people who were never granted access. The gateway tells
+  us which kind of conversation this is. Anything unclear is treated as a channel, and a channel not on
+  the allowlist gets neither.
 """
 
 import json
@@ -82,8 +86,8 @@ class AuthContext:
             text += " Cannot see: " + ", ".join(cannot) + "."
         if "customers" in self.withheld:
             text += (
-                " Customer details are withheld because this is a shared channel. They are"
-                " available in a direct message."
+                " Customer details are withheld in this channel. They are available in a direct"
+                " message and in the sales channel."
             )
         if self.has(ORDER_ENTRY):
             text += " This user can prepare new orders for existing customers (companies or individuals)."
@@ -206,19 +210,24 @@ def resolve_context(user, conversation, request_id):
 
     channel_id = channel_of(conversation)
     withheld = ()
-    if "customers" in granted and visibility != "dm":
-        granted = granted - {"customers"}
-        withheld = ("customers",)
-    if ORDER_ENTRY in granted and visibility != "dm":
-        # Outside a DM, order entry works only in the channels on the allowlist (for example #sales).
-        if not channel_id or channel_id not in get_order_entry_channels():
+    if visibility != "dm" and ("customers" in granted or ORDER_ENTRY in granted):
+        # Outside a DM, both customer details and order entry are limited to the channels on the same
+        # allowlist (for example #sales) - reusing order_entry_channels rather than a second list,
+        # since today they're always the same set of "the sales team's own channels". A channel not
+        # on it (or no channel at all) gets neither. The channel list is only touched when it could
+        # actually matter, so a user who has neither capability is unaffected if it can't be read.
+        allowed_here = bool(channel_id) and channel_id in get_order_entry_channels()
+        if "customers" in granted and not allowed_here:
+            granted = granted - {"customers"}
+            withheld = ("customers",)
+        if ORDER_ENTRY in granted and not allowed_here:
             granted = granted - {ORDER_ENTRY}
             withheld = withheld + (ORDER_ENTRY,)
     if not granted:
         audit("denied", request_id, user_id, source, visibility, reason="nothing_available_here")
         raise AuthorizationError(
             "That isn't available in a channel. Customer details and order entry work in a direct "
-            "message with me (and order entry also in the sales channel)."
+            "message with me, and in the sales channel."
         )
 
     name = str(entry.get("name") or user.get("name") or user_id)

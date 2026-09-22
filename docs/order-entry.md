@@ -28,8 +28,11 @@ after someone with approval rights presses a button is the order created in Shop
  "order_entry_channels": ["C0123SALES"]}
 ```
 Anyone with `orders.approve` who presses a button on the draft can approve it. It does not have to be the
-person who asked. Customer contact details stay DM-only even for people with `customers`: order entry
-shows only the company and location name.
+person who asked. The draft itself never shows customer contact details, in a DM or a channel, whether
+or not the requester also has `customers`: order entry shows only the company and location name (see
+"Finding a customer by email address" below for the one exception, matching by an email address the user
+already typed). The separate `customers` capability (full customer details and search) works the same
+places order entry does - a DM or an `order_entry_channels` channel - and is withheld everywhere else.
 
 ## What happens, and where the safety is
 1. **The model prepares. It cannot create.** It has three tools: `find_customer`, `find_variant` and
