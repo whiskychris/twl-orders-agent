@@ -216,11 +216,10 @@ class PrepareTests(unittest.TestCase):
         self.assertNotIn("only 2", result["text"])
         self.assertNotIn(" 2 ", result["text"].split("⚠️")[1].split("\n")[0])
 
-    def test_an_out_of_stock_line_is_tagged_on_the_row_for_everyone_and_suggests_unpaid(self):
+    def test_an_out_of_stock_line_is_tagged_on_the_row_for_everyone(self):
         for capabilities in (("orders", "order_entry"), ("orders", "order_entry", "inventory")):
             result = self.prepare(capabilities, variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": 0}})
             self.assertIn("[Back Order]", result["text"], capabilities)
-            self.assertIn("usually created as unpaid", result["text"])
             self.assertEqual(result["warnings"], [])   # it's on the row, not a separate warning
 
     def test_an_oversold_line_counts_as_out_of_stock(self):
@@ -231,7 +230,6 @@ class PrepareTests(unittest.TestCase):
     def test_a_pre_order_line_shows_its_eta(self):
         result = self.prepare(variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": 82, "pre_order": True, "eta": "2026-10-16"}})
         self.assertIn("[Pre-order (ETA 16 Oct 2026)]", result["text"])
-        self.assertIn("usually created as unpaid", result["text"])
 
     def test_a_pre_order_with_no_eta_says_so(self):
         result = self.prepare(variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": 82, "pre_order": True, "eta": None}})
@@ -242,10 +240,9 @@ class PrepareTests(unittest.TestCase):
         self.assertIn("[Pre-order (no ETA set)]", result["text"])
         self.assertNotIn("Back Order", result["text"])
 
-    def test_plenty_of_stock_and_no_pre_order_means_no_warning_and_no_tip(self):
+    def test_plenty_of_stock_and_no_pre_order_means_no_warning(self):
         result = self.prepare(variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": 500}})
         self.assertEqual(result["warnings"], [])
-        self.assertNotIn("usually created as unpaid", result["text"])
         self.assertNotIn("⚠️", result["text"])
 
     def test_flags_never_block_the_draft(self):
