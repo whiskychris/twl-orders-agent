@@ -750,6 +750,110 @@ class ExecuteOrderEditTests(unittest.TestCase):
             begin.assert_not_called()
 
 
+class PrepareInvoiceHandoffTests(unittest.TestCase):
+    def test_an_unpaid_order_gets_a_start_invoicing_proposal(self):
+        with mock.patch.object(entry.order_editing, "find_order_for_edit", return_value=edit_order()):
+            result = entry.prepare_invoice_handoff(ctx(), "#1234")
+        proposal = result["proposal"]
+        self.assertEqual(proposal["kind"], "invoice_handoff")
+        self.assertEqual([c["id"] for c in proposal["choices"]], ["approve_invoice"])
+        self.assertEqual(proposal["payload"], {"version": 1, "order_id": ORDER_EDIT_ID, "order_name": "#1234"})
+        self.assertIn("#1234", result["text"])
+
+    def test_a_paid_order_refuses(self):
+        with mock.patch.object(entry.order_editing, "find_order_for_edit", return_value=edit_order(financial_status="PAID")):
+            with self.assertRaises(entry.EntryError):
+                entry.prepare_invoice_handoff(ctx(), "#1234")
+
+    def test_no_capability_refuses(self):
+        with mock.patch.object(entry.order_editing, "find_order_for_edit") as find_order:
+            with self.assertRaises(entry.EntryError):
+                entry.prepare_invoice_handoff(ctx(capabilities=("orders",)), "#1234")
+        find_order.assert_not_called()
+
+    def test_shopify_refusing_becomes_a_clean_refusal(self):
+        with mock.patch.object(entry.order_editing, "find_order_for_edit", side_effect=ShopifyError("not found")):
+            with self.assertRaises(entry.EntryError):
+                entry.prepare_invoice_handoff(ctx(), "#9999")
+
+
+def make_invoice_handoff_proposal(order=None):
+    with mock.patch.object(entry.order_editing, "find_order_for_edit", return_value=order or edit_order()):
+        result = entry.prepare_invoice_handoff(ctx(), "#1234")
+    return {"token": "orders-invoice-1-v1", **result["proposal"]}
+
+
+class ExecuteInvoiceHandoffTests(unittest.TestCase):
+    APPROVER = {"id": "U1", "user_id": "twl:jimmy-shore", "name": "Jimmy Shore", "roles": ["orders.use", "orders.approve"]}
+    CONVERSATION = {"id": "slack:C0SALES:1.1", "source": "slack", "visibility": "channel"}
+
+    def setUp(self):
+        for patch in (
+            mock.patch.object(authorization, "get_authz_config", return_value=USERS),
+            mock.patch.object(authorization, "get_order_entry_channels", return_value=frozenset({"C0SALES"})),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.proposal = make_invoice_handoff_proposal()
+
+    def run_execute(self, choice="approve_invoice", proposal=None, order=None):
+        with mock.patch.object(entry.order_editing, "find_order_for_edit", return_value=order or edit_order()):
+            return entry.execute(self.APPROVER, self.CONVERSATION, choice, proposal or self.proposal, "req1")
+
+    def test_hands_off_to_invoicing(self):
+        result = self.run_execute()
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("#1234", result["text"])
+        self.assertEqual(
+            result["handoff"],
+            {
+                "agent_id": "invoicing", "text": "Prepare a Xero invoice for Shopify order #1234.",
+                "context": {"action": "prepare_invoice", "order_id": ORDER_EDIT_ID, "order_name": "#1234"},
+            },
+        )
+
+    def test_an_unknown_choice_is_refused(self):
+        with mock.patch.object(entry.order_editing, "find_order_for_edit") as find_order:
+            with self.assertRaises(entry.ActRefused):
+                entry.execute(self.APPROVER, self.CONVERSATION, "approve_all", self.proposal, "req1")
+        find_order.assert_not_called()
+
+    def test_no_approve_role_starts_nothing(self):
+        user = {**self.APPROVER, "roles": ["orders.use"]}
+        with mock.patch.object(entry.order_editing, "find_order_for_edit") as find_order:
+            with self.assertRaises(entry.ActRefused):
+                entry.execute(user, self.CONVERSATION, "approve_invoice", self.proposal, "req1")
+        find_order.assert_not_called()
+
+    def test_refuses_if_the_order_became_paid_since_it_was_prepared(self):
+        with self.assertRaises(entry.ActRefused):
+            self.run_execute(order=edit_order(financial_status="PAID"))
+
+    def test_refuses_if_the_order_id_changed(self):
+        with self.assertRaises(entry.ActRefused):
+            self.run_execute(order=edit_order(id="gid://shopify/Order/999"))
+
+    def test_shopify_refusing_is_a_clean_refusal(self):
+        with mock.patch.object(entry.order_editing, "find_order_for_edit", side_effect=ShopifyError("boom")):
+            with self.assertRaises(entry.ActRefused):
+                entry.execute(self.APPROVER, self.CONVERSATION, "approve_invoice", self.proposal, "req1")
+
+    def test_a_malformed_payload_is_refused(self):
+        for mutate in (
+            lambda p: p.update(version=2),
+            lambda p: p.pop("order_id"),
+            lambda p: p.update(order_id="gid://shopify/DraftOrder/9"),
+            lambda p: p.pop("order_name"),
+            lambda p: p.update(order_name=""),
+        ):
+            proposal = {**self.proposal, "payload": dict(self.proposal["payload"])}
+            mutate(proposal["payload"])
+            with mock.patch.object(entry.order_editing, "find_order_for_edit") as find_order:
+                with self.assertRaises(entry.ActRefused, msg=repr(proposal["payload"])):
+                    entry.execute(self.APPROVER, self.CONVERSATION, "approve_invoice", proposal, "req1")
+            find_order.assert_not_called()
+
+
 CUSTOMER = "gid://shopify/Customer/77"
 
 

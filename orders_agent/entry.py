@@ -454,6 +454,8 @@ def execute(user, conversation, choice, proposal, request_id):
     kind = proposal.get("kind")
     if kind == "order_edit":
         return _execute_order_edit(ctx, choice, proposal, request_id)
+    if kind == "invoice_handoff":
+        return _execute_invoice_handoff(ctx, choice, proposal, request_id)
     if kind != "draft_order":
         raise ActRefused("That isn't an order draft, so I did nothing.")
     return _execute_create_order(ctx, choice, proposal, request_id)
@@ -749,3 +751,78 @@ def _execute_order_edit(ctx, choice, proposal, request_id):
     audit("order_entry", request_id, ctx.user_id, ctx.source, ctx.visibility, action="edited", order=order_name)
     url = admin_order_url(order_after["legacyResourceId"])
     return {"status": "ok", "text": f"Success: <{url}|Order {order_after['name']}> updated."}
+
+
+# --- invoicing an existing, already-created order ---------------------------------------------------
+# For an order that was created with "Approve Order Only" (or has otherwise never been invoiced) and is
+# still unpaid. One button hands the thread to the invoicing agent - the exact same handoff order
+# creation's "Approve & Send Invoice" choice uses (see _result above) - which then runs its own,
+# separate approval for the actual Xero invoice. This agent never touches Xero itself.
+
+INVOICE_CHOICES = [{"id": "approve_invoice", "label": "Start Invoicing", "style": "primary"}]
+INVOICE_CHOICE_IDS = frozenset(choice["id"] for choice in INVOICE_CHOICES)
+
+
+def prepare_invoice_handoff(ctx, order_number):
+    """Preview starting to invoice an existing order. Raises EntryError. Nothing is sent here - the
+    invoicing agent runs its own prepare/execute wall after the handoff. Returns {"proposal", "text"}."""
+    if not ctx.has(ORDER_ENTRY):
+        raise EntryError("This user can't invoice orders here.")
+    try:
+        order = order_editing.find_order_for_edit(order_number)  # id/name/financial_status is all this needs
+    except ShopifyError as exc:
+        raise EntryError(str(exc)) from None
+    if order["financial_status"] == "PAID":
+        raise EntryError(f"Order {order['name']} is already paid, so there's nothing to invoice.")
+
+    payload = {"version": 1, "order_id": order["id"], "order_name": order["name"]}
+    items = [{"id": 1, "label": f"Invoice order {order['name']}"}]
+    proposal = {"kind": "invoice_handoff", "items": items, "payload": payload, "choices": INVOICE_CHOICES}
+    text = (
+        f"Ready to start invoicing order {order['name']}. Approving hands the thread to the invoicing "
+        "agent, which prepares its own Xero invoice preview for its own separate approval."
+    )
+    return {"proposal": proposal, "text": text}
+
+
+def _validate_invoice_handoff_payload(payload):
+    try:
+        if payload.get("version") != 1:
+            raise ValueError("version")
+        order_id = str(payload["order_id"])
+        if not ORDER_ID.match(order_id):
+            raise ValueError("order_id")
+        order_name = str(payload["order_name"])
+        if not order_name:
+            raise ValueError("order_name")
+        return order_id, order_name
+    except (KeyError, TypeError, ValueError):
+        raise ActRefused("That invoicing request is malformed, so nothing was started. Ask me again.") from None
+
+
+def _execute_invoice_handoff(ctx, choice, proposal, request_id):
+    """Re-checks the order is still unpaid right before handing off - never trusts what prepare() saw -
+    then hands the thread to the invoicing agent. Raises ActRefused (nothing started)."""
+    if choice not in INVOICE_CHOICE_IDS:
+        raise ActRefused("I need an approval to start invoicing. Use the button.")
+    order_id, order_name = _validate_invoice_handoff_payload(proposal.get("payload") or {})
+
+    try:
+        order = order_editing.find_order_for_edit(order_name)
+    except ShopifyError as exc:
+        raise ActRefused(str(exc)) from None
+    if order["id"] != order_id:
+        raise ActRefused("That order has changed since this was prepared. Ask me to prepare it again.")
+    if order["financial_status"] == "PAID":
+        raise ActRefused(f"Order {order_name} is already paid, so I did nothing.")
+
+    audit("order_entry", request_id, ctx.user_id, ctx.source, ctx.visibility, action="invoice_handoff", order=order_name)
+    return {
+        "status": "ok",
+        "text": f"Starting to invoice order {order_name}...",
+        "handoff": {
+            "agent_id": "invoicing",
+            "text": f"Prepare a Xero invoice for Shopify order {order_name}.",
+            "context": {"action": "prepare_invoice", "order_id": order_id, "order_name": order_name},
+        },
+    }
