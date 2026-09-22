@@ -193,7 +193,12 @@ change an order that's already been created: "on #1234, change Arran 10 to 12", 
 ## Search syntax (Shopify)
 - Orders: `created_at:>=2026-09-21T00:00:00+10:00`, `financial_status:paid|pending|refunded|partially_refunded`,
   `fulfillment_status:unfulfilled|fulfilled|partial`, `status:open|closed|cancelled`, `name:1234`,
-  `sku:ABC123`, `tag:vip`. Combine with spaces (which means AND).
+  `sku:ABC123`, `tag:vip`. Combine with spaces (which means AND). `customer_tag:a,b` (comma means OR)
+  filters by the CUSTOMER's tags - this service's own filter, not Shopify's, needs customer access, and
+  costs a scan rather than a single lookup (see `search_orders`'s own description for the mechanics).
+  TWL's **trade customers** (bottle shops, online retailers, bars, pubs, restaurants - resellers and
+  hospitality who buy from TWL) are tagged `Off-Prem` (retailers) or `On-Prem` (hospitality) on the
+  customer, so "trade customers" means `customer_tag:Off-Prem,On-Prem`.
 - Products: `title:*ardnahoe*`, `vendor:Adelphi`, `product_type:whisky`, `status:active`, `sku:ABC123`,
   `tag:rare`, `inventory_total:<10`.
 - Inventory: `sku:ABC123`.

@@ -137,7 +137,17 @@ def build_server(ctx, state=None):
             "at most 50 orders with status, total, item lines and where they were sold. If the "
             "user has no customer access, only those structured filters work (no free text, "
             "names, emails or addresses). Only orders from the last 60 days are visible unless "
-            "the store granted read_all_orders.",
+            "the store granted read_all_orders.\n"
+            "customer_tag:a,b (comma means OR) filters by the CUSTOMER's tags - this service's own "
+            "filter, not Shopify's (Shopify has no direct way to search orders by the customer's "
+            "tags), so it costs extra: it scans recent orders rather than a single lookup, and needs "
+            "customer access. TWL's 'trade customers' (bottle shops, online retailers, bars, pubs, "
+            "restaurants - resellers and hospitality) are tagged Off-Prem (retailers) or On-Prem "
+            "(hospitality) on the customer, so 'orders from trade customers' is "
+            "customer_tag:Off-Prem,On-Prem. Combine with other filters as usual, for example "
+            "customer_tag:Off-Prem,On-Prem financial_status:paid. If a scan can't find enough within "
+            "its limit, the result says so and suggests narrowing the search (a date range, for "
+            "example) rather than silently under-reporting.",
             _schema(
                 {
                     "query": {**STRING, "description": "Shopify order search string. Empty means all recent orders."},

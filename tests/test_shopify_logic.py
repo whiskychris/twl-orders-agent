@@ -215,6 +215,77 @@ class OrderRowTests(unittest.TestCase):
         self.assertEqual(row["ship_to"], "Sydney, NSW, AU")
 
 
+class CustomerTagFilterTests(unittest.TestCase):
+    """customer_tag: has no Shopify equivalent (only customer_id is searchable on an order), so
+    search_orders extracts it and scans in code - see shopify._extract_customer_tags."""
+
+    def order_node(self, name, customer_tags):
+        return {
+            "name": name, "createdAt": "2026-09-21T01:00:00Z", "cancelledAt": None,
+            "displayFinancialStatus": "PAID", "displayFulfillmentStatus": "FULFILLED",
+            "currentTotalPriceSet": {"shopMoney": {"amount": "10.00", "currencyCode": "AUD"}},
+            "subtotalLineItemsQuantity": 1, "sourceName": "web", "tags": [],
+            "customer": {"displayName": "X", "numberOfOrders": 1, "tags": customer_tags},
+            "lineItems": {"nodes": []},
+        }
+
+    def test_extract_customer_tags_is_case_insensitive_and_strips_only_that_token(self):
+        remaining, tags = shopify._extract_customer_tags("customer_tag:Off-Prem,On-Prem financial_status:paid")
+        self.assertEqual(remaining, "financial_status:paid")
+        self.assertEqual(tags, frozenset({"off-prem", "on-prem"}))
+
+    def test_no_customer_tag_token_means_no_filtering(self):
+        remaining, tags = shopify._extract_customer_tags("status:open")
+        self.assertEqual(remaining, "status:open")
+        self.assertIsNone(tags)
+
+    def test_refused_without_customer_access(self):
+        with mock.patch.object(shopify, "graphql") as fake:
+            with self.assertRaises(shopify.RestrictedError):
+                shopify.search_orders("customer_tag:Off-Prem", include_customer=False)
+            fake.assert_not_called()
+
+    def test_finds_matches_and_stops_scanning_once_enough_are_found(self):
+        page = {
+            "orders": {
+                "nodes": [self.order_node("#1", ["VIP"]), self.order_node("#2", ["Off-Prem"]), self.order_node("#3", ["On-Prem"])],
+                "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+            }
+        }
+        with mock.patch.object(shopify, "graphql", return_value=page) as fake:
+            result = shopify.search_orders("customer_tag:Off-Prem,On-Prem", limit=2, include_customer=True)
+        self.assertEqual([o["name"] for o in result["orders"]], ["#2", "#3"])
+        self.assertEqual(fake.call_count, 1)  # stopped after the first page, enough were found
+        self.assertNotIn("note", result)
+
+    def test_scans_further_pages_when_the_first_has_no_matches(self):
+        page1 = {"orders": {"nodes": [self.order_node("#1", ["VIP"])], "pageInfo": {"hasNextPage": True, "endCursor": "c1"}}}
+        page2 = {"orders": {"nodes": [self.order_node("#2", ["Off-Prem"])], "pageInfo": {"hasNextPage": False, "endCursor": None}}}
+        with mock.patch.object(shopify, "graphql", side_effect=[page1, page2]) as fake:
+            result = shopify.search_orders("customer_tag:Off-Prem", limit=5, include_customer=True)
+        self.assertEqual([o["name"] for o in result["orders"]], ["#2"])
+        self.assertEqual(fake.call_count, 2)
+
+    def test_gives_up_after_the_scan_cap_and_says_so(self):
+        page = {"orders": {"nodes": [self.order_node("#x", ["VIP"])], "pageInfo": {"hasNextPage": True, "endCursor": "c"}}}
+        with mock.patch.object(shopify, "graphql", return_value=page) as fake:
+            result = shopify.search_orders("customer_tag:Off-Prem", limit=5, include_customer=True)
+        self.assertEqual(result["orders"], [])
+        self.assertTrue(result["has_more"])
+        self.assertIn("note", result)
+        self.assertEqual(fake.call_count, shopify.CUSTOMER_TAG_SCAN_MAX_PAGES)
+
+    def test_other_filters_still_reach_shopify_alongside_customer_tag(self):
+        page = {"orders": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}
+        with mock.patch.object(shopify, "graphql", return_value=page) as fake:
+            shopify.search_orders("customer_tag:Off-Prem financial_status:paid", include_customer=True)
+        self.assertEqual(fake.call_args[0][1]["query"], "financial_status:paid")
+
+    def test_order_row_carries_customer_tags_when_fetched(self):
+        row = shopify._order_row(self.order_node("#1", ["Off-Prem"]))
+        self.assertEqual(row["customer"]["tags"], ["Off-Prem"])
+
+
 class LowStockTests(unittest.TestCase):
     def test_only_active_products_are_returned(self):
         page = {

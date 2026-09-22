@@ -12,7 +12,7 @@ still offers them), install it on the store, and grant only these scopes:
 | `read_all_orders` | orders older than 60 days. Needs Shopify's approval for the app. Optional. |
 | `read_products` | products and variants |
 | `read_inventory`, `read_locations` | stock levels by location |
-| `read_customers` | customers. Customer data is only shown to users with the `customers` capability, in a DM (see `docs/authorization.md`) |
+| `read_customers` | customers. Customer data is only shown to users with the `customers` capability, in a DM or the sales channel (see `docs/authorization.md`) |
 | `read_assigned_fulfillment_orders`, `read_merchant_managed_fulfillment_orders`, `read_third_party_fulfillment_orders` | fulfilments and tracking on an order |
 
 | `read_companies` | B2B companies, locations and contacts, for order entry |
@@ -46,10 +46,22 @@ Fixed queries only, validated against Shopify's Admin schema. The model supplies
 numbers, which go in as GraphQL variables. It never writes GraphQL.
 
 Not requested at all: unit costs and margins, payment details, full billing addresses. Customer names, emails,
-phones, shipping addresses and the order note are requested only for callers with the `customers` capability
-in a DM, and stock quantities only with `inventory` (all via `@include` directives), so they are never fetched
-for anyone else. The Shopify app itself holds one set of scopes for everyone. The per-person limits are
-enforced by this service.
+phones, shipping addresses, tags and the order note are requested only for callers with the `customers`
+capability (in a DM or the sales channel), and stock quantities only with `inventory` (all via `@include`
+directives), so they are never fetched for anyone else. The Shopify app itself holds one set of scopes for
+everyone. The per-person limits are enforced by this service.
+
+### Filtering orders by the customer's tags
+Shopify's order search has no filter for the CUSTOMER's tags (only `customer_id`, and the order's own
+tags) - confirmed against Shopify's own `OrderConnection` filter list. `search_orders` adds its own
+`customer_tag:a,b` (comma means OR), handled entirely in `orders_agent/sources/shopify.py`
+(`_extract_customer_tags`): the token is stripped before the rest of the query reaches Shopify, and
+matches are found by paging through orders newest-first and checking each one's already-fetched
+`customer.tags`, stopping once enough are found or `CUSTOMER_TAG_SCAN_MAX_PAGES` (6 pages of 50 = 300
+orders) is hit - reported honestly via a `note` if it gives up early, rather than silently returning
+fewer than asked. Needs the `customers` capability, same as any other customer field. TWL's own use:
+**trade customers** (bottle shops, online retailers, bars, pubs, restaurants) are tagged `Off-Prem` or
+`On-Prem`, so `customer_tag:Off-Prem,On-Prem` means "trade customers" - see `CLAUDE.md`.
 
 ## Limits to know about
 - Orders older than 60 days are invisible without `read_all_orders`. The assistant says so.
