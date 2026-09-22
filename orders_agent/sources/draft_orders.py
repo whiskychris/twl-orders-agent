@@ -171,6 +171,15 @@ query DraftByTag($query: String!) {
 }
 """
 
+MARK_PAID = """
+mutation MarkPaid($input: OrderMarkAsPaidInput!) {
+  orderMarkAsPaid(input: $input) {
+    order { id name legacyResourceId displayFinancialStatus }
+    userErrors { field message }
+  }
+}
+"""
+
 
 def _nodes(connection):
     return (connection or {}).get("nodes") or []
@@ -536,4 +545,17 @@ def complete_draft(draft_id):
     order = draft.get("order")
     if not order:
         raise ShopifyError("Shopify completed the draft but did not return the order.")
+    return order
+
+
+def mark_paid(order_id):
+    """Record the outstanding balance as paid outside Shopify's own checkout - this is what the
+    invoicing agent hands back here for, once it has actually sent the Xero invoice. Refuses if the
+    order is already paid or has no outstanding balance (Shopify's own rule, not this agent's)."""
+    data = graphql(MARK_PAID, {"input": {"id": order_id}})
+    payload = data.get("orderMarkAsPaid") or {}
+    _user_errors(payload, "mark the order paid")
+    order = payload.get("order")
+    if not order:
+        raise ShopifyError("Shopify did not return the order after marking it paid.")
     return order

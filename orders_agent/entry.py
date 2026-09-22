@@ -15,11 +15,15 @@ Two phases, with a hard wall between them:
               safe to repeat: the draft carries a tag from the proposal's token, so a second attempt
               finds the first instead of making another.
 
-Paid vs unpaid (a choice made when approving):
-  create_paid    complete the draft normally: Shopify records it as paid. In TWL's process "paid" means it
-                 was invoiced through Xero. This agent does not touch Xero.
-  create_unpaid  put payment terms on the draft (the location's own terms, else "due on fulfilment"), so
-                 Shopify creates the order with payment outstanding.
+The Shopify order is ALWAYS created unpaid, on TWL's own "Due on fulfilment" terms - "paid" is not a choice
+made here any more. A choice made when approving is only whether to start invoicing:
+  approve_send_invoice  create the order, then hand the thread to the invoicing agent, which prepares and
+                        (after its own approval) sends a Xero invoice.
+  approve_only          create the order the same way, but do not start invoicing. It stays unpaid until
+                        someone later asks to invoice it.
+Shopify only marks the order paid once its Xero invoice has actually been sent - that is what allows it to
+be dispatched. The invoicing agent hands the thread back here for that (see mark_order_paid in main.py),
+naming the order to mark paid in structured `context`, not in text a model would have to parse.
 """
 
 import re
@@ -48,8 +52,8 @@ TOLERANCE = Decimal("0.02")
 CENTS = Decimal("0.01")
 
 CHOICES = [
-    {"id": "create_paid", "label": "Create order (invoiced, paid)", "style": "primary"},
-    {"id": "create_unpaid", "label": "Create order (not invoiced, unpaid)"},
+    {"id": "approve_send_invoice", "label": "Approve & Send Invoice", "style": "primary"},
+    {"id": "approve_only", "label": "Approve Order Only"},
 ]
 CHOICE_IDS = frozenset(choice["id"] for choice in CHOICES)
 TERMS_TYPES = frozenset({"RECEIPT", "NET", "FIXED", "FULFILLMENT", "UNKNOWN"})
@@ -408,16 +412,25 @@ def _authorize(user, conversation, request_id):
     return ctx
 
 
-def _result(order, paid, prefix=""):
+def _result(order, invoicing, prefix=""):
     name = order["name"]
     url = admin_order_url(order["legacyResourceId"])
-    state = "paid" if paid else "unpaid"
-    text = f"{prefix}Success: <{url}|Order {name}> created ({state})"
-    return {
+    text = f"{prefix}Success: <{url}|Order {name}> created"
+    if not invoicing:
+        text += " (not yet invoiced)"
+    response = {
         "status": "ok",
         "text": text,
-        "result": {"order": name, "order_id": order["id"], "paid": paid, "url": url},
+        "result": {"order": name, "order_id": order["id"], "invoicing": invoicing, "url": url},
     }
+    if invoicing:
+        # The invoicing agent takes it from here: it prepares and, after its own approval, sends the
+        # Xero invoice, then hands the thread back here (mark_order_paid) once that's done.
+        response["handoff"] = {
+            "agent_id": "invoicing",
+            "text": f"Prepare a Xero invoice for Shopify order {name}.",
+        }
+    return response
 
 
 def execute(user, conversation, choice, proposal, request_id):
@@ -425,7 +438,7 @@ def execute(user, conversation, choice, proposal, request_id):
     was not completed). Any other exception means the outcome is unknown."""
     ctx = _authorize(user, conversation, request_id)
     if choice not in CHOICE_IDS:
-        raise ActRefused("I need to know whether to create it as paid or unpaid. Use one of the buttons.")
+        raise ActRefused("I need to know whether to approve and invoice, or approve only. Use one of the buttons.")
     if not isinstance(proposal, dict) or proposal.get("kind") != "draft_order":
         raise ActRefused("That isn't an order draft, so I did nothing.")
     token = str(proposal.get("token", ""))
@@ -433,14 +446,14 @@ def execute(user, conversation, choice, proposal, request_id):
         raise ActRefused("That draft has no valid reference, so I did nothing.")
 
     target, lines, expected, terms_id, terms_type, note, _requester = _validate_payload(proposal.get("payload") or {})
-    paid = choice == "create_paid"
+    invoice_now = choice == "approve_send_invoice"
     tag = f"smith-{token}"[:40]
 
     try:
         existing = shop.find_draft_by_tag(tag)
         if existing and existing.get("status") == "COMPLETED" and existing.get("order"):
             audit("order_entry", request_id, ctx.user_id, ctx.source, ctx.visibility, action="already_created")
-            return _result(existing["order"], paid, "Already done. ")
+            return _result(existing["order"], invoice_now, "Already done. ")
         if existing and existing.get("status") != "OPEN":
             raise ActRefused("A draft for this already exists in an unexpected state, so I did nothing. Check Shopify.")
 
@@ -458,11 +471,9 @@ def execute(user, conversation, choice, proposal, request_id):
                     f"The price changed since the draft: it was {expected['total']} and is now {calc['total']}. "
                     "Nothing was created. Ask me to draft it again."
                 )
+            # Always created unpaid, on TWL's own terms - see the module docstring.
             draft = shop.create_draft(
-                build_input(
-                    subject, lines, order_note, ["smith-order-entry", tag],
-                    None if paid else terms_id, None if paid else terms_type,
-                )
+                build_input(subject, lines, order_note, ["smith-order-entry", tag], terms_id, terms_type)
             )
             draft_id = draft["id"]
 
@@ -473,5 +484,40 @@ def execute(user, conversation, choice, proposal, request_id):
     except ShopifyError as exc:
         raise ActRefused(f"{exc} (If a draft was saved it is not completed, and is safe to leave.)") from None
 
-    audit("order_entry", request_id, ctx.user_id, ctx.source, ctx.visibility, action="created", paid=paid, order=order["name"])
-    return _result(order, paid)
+    audit(
+        "order_entry", request_id, ctx.user_id, ctx.source, ctx.visibility,
+        action="created", invoicing=invoice_now, order=order["name"],
+    )
+    return _result(order, invoice_now)
+
+
+# --- receiving a handoff back from invoicing --------------------------------------------------------
+
+ORDER_ID = re.compile(r"^gid://shopify/Order/\d+$")
+
+
+def mark_order_paid(user, conversation, order_id, request_id):
+    """Mark an existing Shopify order paid. The only caller is the gateway's handoff relay, right
+    after the invoicing agent has actually created and sent the Xero invoice for this order - never
+    the model, and never from free text: `order_id` comes from the handoff's structured `context`,
+    the same Shopify id the invoicing agent read the order by, not parsed from a sentence. Being paid
+    is what allows the order to be dispatched. Raises ActRefused; nothing is left ambiguous."""
+    roles = [str(role) for role in ((user or {}).get("roles") or [])]
+    if APPROVE_ROLE not in roles:
+        raise ActRefused("You don't have permission to mark orders paid.")
+    try:
+        ctx = resolve_context(user, conversation, request_id)
+    except AuthorizationError as exc:
+        raise ActRefused(str(exc)) from None
+    if not ctx.has(ORDER_ENTRY):
+        raise ActRefused("Marking orders paid isn't available in this conversation.")
+    if not ORDER_ID.match(str(order_id or "")):
+        raise ActRefused("That doesn't look like a Shopify order id, so I did nothing.")
+
+    try:
+        order = shop.mark_paid(order_id)
+    except ShopifyError as exc:
+        raise ActRefused(str(exc)) from None
+
+    audit("order_entry", request_id, ctx.user_id, ctx.source, ctx.visibility, action="marked_paid", order=order["name"])
+    return {"text": f"Order *{order['name']}* is marked paid and ready to dispatch."}
