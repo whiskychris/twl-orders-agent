@@ -466,12 +466,14 @@ def build_server(ctx, state=None):
         add(
             "prepare_invoice_for_order",
             "Start invoicing an EXISTING order that hasn't been invoiced yet - for example one created "
-            "with 'Approve Order Only', or any order that's still unpaid. Nothing is sent here: "
-            "approving hands the thread to the invoicing agent, which prepares its own Xero invoice "
-            "preview for its own separate approval. Refuses if the order is already paid (meaning it's "
-            "already been invoiced through this system). Use get_order first if you want to check an "
-            "order's status before offering to invoice it. This is a different thing from prepare_order_edit - "
-            "invoicing sends the order to Xero, it never changes what's on the order.",
+            "with 'Approve Order Only', or any order that's still unpaid. Posts the order's current "
+            "lines and total with two buttons: Send Invoice (hands the thread to the invoicing agent, "
+            "which prepares its own Xero invoice preview for its own separate approval) and Edit Order "
+            "(prompts for a change, then re-shows this same screen once it's approved - you don't need "
+            "to do anything extra for that, it happens on its own). Nothing is sent to Xero from here. "
+            "Refuses if the order is already paid (meaning it's already been invoiced through this "
+            "system). This is a different thing from prepare_order_edit - invoicing sends the order to "
+            "Xero, it never changes what's on the order.",
             _schema({"order": {**STRING, "description": "Order number, with or without #."}}, required=["order"]),
             prepare_invoice_for_order,
         )

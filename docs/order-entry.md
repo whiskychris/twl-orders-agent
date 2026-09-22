@@ -149,19 +149,31 @@ two-step flow described above - Approve Order Only defers invoicing, and this is
 on demand, instead of only at creation time.
 
 The model has one tool, `prepare_invoice_for_order` (`entry.prepare_invoice_handoff`), which:
-1. Looks the order up and refuses if it's already `PAID` (meaning it's already been invoiced through
-   this system - nothing to do).
-2. Posts a single **Start Invoicing** button. Approving does not touch Xero itself: `execute()`
-   re-checks the order is still unpaid (never trusting what `prepare()` saw), then hands the thread to
-   `twl-invoicing-agent` with the same `prepare_invoice` handoff order creation's **Approve & Send
-   Invoice** choice uses (see `_result` above) - so from here it's the exact same flow, just started
-   later instead of at creation. The invoicing agent then runs its own, separate approval for the actual
-   Xero invoice, and hands the thread back here once it's sent, to mark the order paid.
+1. Looks the order up (`order_editing.find_order_for_edit`, extended with pricing - see below) and
+   refuses if it's already `PAID` (meaning it's already been invoiced through this system - nothing to
+   do).
+2. Posts the order's **current lines and total**, priced from Shopify's own numbers - not a blind
+   confirmation of an order number - with two buttons:
+   - **Send Invoice**: `execute()` re-checks the order is still unpaid (never trusting what `prepare()`
+     saw), then hands the thread to `twl-invoicing-agent` with the same `prepare_invoice` handoff order
+     creation's **Approve & Send Invoice** choice uses (see `_result` above) - the exact same flow, just
+     started later instead of at creation. The invoicing agent then runs its own, separate approval for
+     the actual Xero invoice, and hands the thread back here once it's sent, to mark the order paid.
+   - **Edit Order**: a detour, not a dead end. `execute()` sends nothing anywhere for this choice - it's
+     a plain prompt asking what to change, and the actual edit runs through `prepare_order_edit` exactly
+     as in the previous section. Once that edit is *committed* (`_execute_order_edit`), its own success
+     reply carries a **self-handoff** back to `orders` (`context.action: "prepare_invoice_confirmation"`),
+     which `main.py`'s `/v1/message` dispatches deterministically - no model involved, same shape as the
+     existing `mark_order_paid` dispatch - straight back into `prepare_invoice_handoff` for the SAME
+     order, now re-priced with whatever just changed. This makes a successful edit on any order always
+     end by re-offering to invoice it, since a successful edit only ever leaves an order unpaid (paid
+     orders are refused before anything is staged) - not only edits that started from this screen.
 
 This is deliberately a thin wrapper: no new Xero logic, no new mapping rules - it just gets an
 already-built order into the exact same handoff the "new order" flow already uses. Reuses the
-`order_entry` capability and the existing `order_editing.find_order_for_edit` lookup (id, name, financial
-status - all this needs), so no new Shopify query was needed either.
+`order_entry` capability and the existing `order_editing.find_order_for_edit` lookup, extended with each
+line's current price and the order's total (needed for the confirmation preview, not for staging an
+edit) so no second Shopify query was needed for either use.
 
 ## Customer emails
 Customers are emailed by Shopify's usual order notifications when the order is **created**, not while it is a

@@ -750,26 +750,58 @@ def _execute_order_edit(ctx, choice, proposal, request_id):
 
     audit("order_entry", request_id, ctx.user_id, ctx.source, ctx.visibility, action="edited", order=order_name)
     url = admin_order_url(order_after["legacyResourceId"])
-    return {"status": "ok", "text": f"Success: <{url}|Order {order_after['name']}> updated."}
+    # A successful edit always leaves the order unpaid (paid orders are refused above, before anything
+    # is staged), so it's always worth re-offering the invoice decision - a self-handoff back to this
+    # same agent, deterministic (see main.py's prepare_invoice_confirmation dispatch, the same shape as
+    # the existing mark_order_paid one), re-priced with whatever just changed.
+    return {
+        "status": "ok",
+        "text": f"Success: <{url}|Order {order_after['name']}> updated.",
+        "handoff": {
+            "agent_id": "orders",
+            "text": f"Show the invoicing options for order {order_after['name']}.",
+            "context": {
+                "action": "prepare_invoice_confirmation",
+                "order_id": order_after["id"], "order_name": order_after["name"],
+            },
+        },
+    }
 
 
 # --- invoicing an existing, already-created order ---------------------------------------------------
 # For an order that was created with "Approve Order Only" (or has otherwise never been invoiced) and is
-# still unpaid. One button hands the thread to the invoicing agent - the exact same handoff order
+# still unpaid. Send Invoice hands the thread to the invoicing agent - the exact same handoff order
 # creation's "Approve & Send Invoice" choice uses (see _result above) - which then runs its own,
-# separate approval for the actual Xero invoice. This agent never touches Xero itself.
+# separate approval for the actual Xero invoice. This agent never touches Xero itself. Edit Order is a
+# detour, not a dead end: prepare_order_edit's own success handoff (see _execute_order_edit) brings the
+# user straight back to this same screen, re-priced, once the edit is committed.
 
-INVOICE_CHOICES = [{"id": "approve_invoice", "label": "Start Invoicing", "style": "primary"}]
+INVOICE_CHOICES = [
+    {"id": "approve_invoice", "label": "Send Invoice", "style": "primary"},
+    {"id": "edit_first", "label": "Edit Order"},
+]
 INVOICE_CHOICE_IDS = frozenset(choice["id"] for choice in INVOICE_CHOICES)
 
 
+def _invoice_handoff_preview(order):
+    """What's currently on the order, from Shopify's own numbers - so approving Send Invoice is an
+    informed decision, not a blind confirmation of an order number."""
+    rows = [
+        f"{number}. {line['title']}: {line['quantity']} @ {fmt(line['unit_price'])} → *{fmt(line['line_total'])}*"
+        for number, line in enumerate(order["lines"], 1)
+    ]
+    parts = [f"*Order {order['name']}*", "\n".join(rows), f"*Total {fmt(order['total'])} {order['currency']}*"]
+    return "\n\n".join(parts)
+
+
 def prepare_invoice_handoff(ctx, order_number):
-    """Preview starting to invoice an existing order. Raises EntryError. Nothing is sent here - the
-    invoicing agent runs its own prepare/execute wall after the handoff. Returns {"proposal", "text"}."""
+    """Preview starting to invoice an existing order, priced from Shopify's own numbers. Raises
+    EntryError. Nothing is sent here - the invoicing agent runs its own prepare/execute wall after the
+    handoff. Returns {"proposal", "text"}."""
     if not ctx.has(ORDER_ENTRY):
         raise EntryError("This user can't invoice orders here.")
     try:
-        order = order_editing.find_order_for_edit(order_number)  # id/name/financial_status is all this needs
+        order = order_editing.find_order_for_edit(order_number)
     except ShopifyError as exc:
         raise EntryError(str(exc)) from None
     if order["financial_status"] == "PAID":
@@ -778,11 +810,7 @@ def prepare_invoice_handoff(ctx, order_number):
     payload = {"version": 1, "order_id": order["id"], "order_name": order["name"]}
     items = [{"id": 1, "label": f"Invoice order {order['name']}"}]
     proposal = {"kind": "invoice_handoff", "items": items, "payload": payload, "choices": INVOICE_CHOICES}
-    text = (
-        f"Ready to start invoicing order {order['name']}. Approving hands the thread to the invoicing "
-        "agent, which prepares its own Xero invoice preview for its own separate approval."
-    )
-    return {"proposal": proposal, "text": text}
+    return {"proposal": proposal, "text": _invoice_handoff_preview(order)}
 
 
 def _validate_invoice_handoff_payload(payload):
@@ -801,11 +829,23 @@ def _validate_invoice_handoff_payload(payload):
 
 
 def _execute_invoice_handoff(ctx, choice, proposal, request_id):
-    """Re-checks the order is still unpaid right before handing off - never trusts what prepare() saw -
-    then hands the thread to the invoicing agent. Raises ActRefused (nothing started)."""
+    """Send Invoice re-checks the order is still unpaid right before handing off - never trusts what
+    prepare() saw - then hands the thread to the invoicing agent. Edit Order sends nothing anywhere:
+    it's a plain prompt, and the actual edit runs through prepare_order_edit as normal (its own success
+    brings the user back here). Raises ActRefused (nothing started)."""
     if choice not in INVOICE_CHOICE_IDS:
-        raise ActRefused("I need an approval to start invoicing. Use the button.")
+        raise ActRefused("I need an approval to invoice or edit this order. Use one of the buttons.")
     order_id, order_name = _validate_invoice_handoff_payload(proposal.get("payload") or {})
+
+    if choice == "edit_first":
+        return {
+            "status": "ok",
+            "text": (
+                f"No problem — tell me what to change on {order_name} (for example 'change Arran 10 to "
+                "12' or 'add 3 x GlenAllachie 12'). I'll show the invoicing options again once that's "
+                "approved."
+            ),
+        }
 
     try:
         order = order_editing.find_order_for_edit(order_name)
