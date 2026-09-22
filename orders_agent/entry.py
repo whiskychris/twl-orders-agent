@@ -262,8 +262,7 @@ def prepare(ctx, raw_target, raw_lines, note=None):
     user_note = _one_line(note, MAX_NOTE)
     subject = resolve_subject(target)
 
-    order_note = f"Raised in Slack by {ctx.name} via Smith." + (f" {user_note}" if user_note else "")
-    calc = shop.calculate(build_input(subject, lines, order_note, ["smith-order-entry"]))
+    calc = shop.calculate(build_input(subject, lines, user_note, ["smith-order-entry"]))
     check_pricing(lines, calc)
 
     variants = shop.get_variants([line["variant_id"] for line in lines])
@@ -409,11 +408,11 @@ def _authorize(user, conversation, request_id):
     return ctx
 
 
-def _result(order, company, paid, note):
+def _result(order, paid, prefix=""):
     name = order["name"]
     url = admin_order_url(order["legacyResourceId"])
-    state = "marked as paid (invoiced)" if paid else "created as unpaid (waiting to be invoiced)"
-    text = f"{note}Order *{name}* for *{company}* is {state}.\n<{url}|Open {name} in Shopify>"
+    state = "paid" if paid else "unpaid"
+    text = f"{prefix}Success: <{url}|Order {name}> created ({state})"
     return {
         "status": "ok",
         "text": text,
@@ -433,9 +432,7 @@ def execute(user, conversation, choice, proposal, request_id):
     if not TOKEN.match(token):
         raise ActRefused("That draft has no valid reference, so I did nothing.")
 
-    target, lines, expected, terms_id, terms_type, note, requester = _validate_payload(proposal.get("payload") or {})
-    payload = proposal["payload"]
-    customer_name = payload["display"]["name"]
+    target, lines, expected, terms_id, terms_type, note, _requester = _validate_payload(proposal.get("payload") or {})
     paid = choice == "create_paid"
     tag = f"smith-{token}"[:40]
 
@@ -443,7 +440,7 @@ def execute(user, conversation, choice, proposal, request_id):
         existing = shop.find_draft_by_tag(tag)
         if existing and existing.get("status") == "COMPLETED" and existing.get("order"):
             audit("order_entry", request_id, ctx.user_id, ctx.source, ctx.visibility, action="already_created")
-            return _result(existing["order"], customer_name, paid, "Already done. ")
+            return _result(existing["order"], paid, "Already done. ")
         if existing and existing.get("status") != "OPEN":
             raise ActRefused("A draft for this already exists in an unexpected state, so I did nothing. Check Shopify.")
 
@@ -451,10 +448,8 @@ def execute(user, conversation, choice, proposal, request_id):
             draft_id = existing["id"]
         else:
             subject = resolve_subject(target)
-            order_note = f"Raised in Slack by {requester['name']} via Smith, approved by {ctx.name}."
-            order_note += f" {'Marked paid: invoiced in Xero.' if paid else 'Not invoiced yet: unpaid.'}"
-            if note:
-                order_note += f" {note}"
+            # The Shopify note carries only what the user actually typed - nothing added by this process.
+            order_note = note or ""
 
             calc = shop.calculate(build_input(subject, lines, order_note, ["smith-order-entry"]))
             check_pricing(lines, calc)
@@ -479,4 +474,4 @@ def execute(user, conversation, choice, proposal, request_id):
         raise ActRefused(f"{exc} (If a draft was saved it is not completed, and is safe to leave.)") from None
 
     audit("order_entry", request_id, ctx.user_id, ctx.source, ctx.visibility, action="created", paid=paid, order=order["name"])
-    return _result(order, customer_name, paid, "")
+    return _result(order, paid)

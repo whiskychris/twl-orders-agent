@@ -173,7 +173,7 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(entity["companyId"], COMPANY)
         self.assertEqual(entity["companyLocationId"], LOCATION)
         self.assertNotIn("email", self.last_input)  # no email field, so no customer notification
-        self.assertIn("Raised in Slack by Jimmy Shore via Smith. PO 123", self.last_input["note"])
+        self.assertEqual(self.last_input["note"], "PO 123")  # only what the user typed, nothing added
 
     def test_the_text_never_contains_contact_details_or_addresses(self):
         import re
@@ -309,16 +309,14 @@ class ExecuteTests(unittest.TestCase):
     def test_paid_creates_the_order_with_no_payment_terms(self):
         result = self.run_execute("create_paid")
         self.assertEqual(result["status"], "ok")
-        self.assertIn("#1234", result["text"])
-        self.assertIn("https://admin.example/orders/9", result["text"])
-        self.assertIn("marked as paid", result["text"])
+        self.assertEqual(result["text"], "Success: <https://admin.example/orders/9|Order #1234> created (paid)")
         self.assertTrue(result["result"]["paid"])
         self.assertNotIn("paymentTerms", self.created[0])
         self.assertEqual(self.completed, ["gid://shopify/DraftOrder/5"])
 
     def test_unpaid_creates_the_order_with_payment_terms(self):
         result = self.run_execute("create_unpaid")
-        self.assertIn("unpaid", result["text"])
+        self.assertEqual(result["text"], "Success: <https://admin.example/orders/9|Order #1234> created (unpaid)")
         self.assertFalse(result["result"]["paid"])
         self.assertEqual(self.created[0]["paymentTerms"], {"paymentTermsTemplateId": TERMS["id"]})
 
@@ -337,13 +335,19 @@ class ExecuteTests(unittest.TestCase):
         self.run_execute("create_paid")
         self.assertNotIn("paymentTerms", self.created[0])
 
-    def test_the_draft_is_tagged_and_carries_who_asked_and_who_approved(self):
+    def test_the_draft_is_tagged_and_the_note_is_only_what_the_user_typed(self):
+        # make_prepared() supplies "PO 123" as the user's note. Nothing else - no "Raised in Slack by...",
+        # no "approved by...", no paid/unpaid text - is added.
         self.run_execute("create_paid")
         draft = self.created[0]
         self.assertIn("smith-orders-20260921-1500-ab12-v1", draft["tags"])
-        self.assertIn("approved by Jimmy Shore", draft["note"])
-        self.assertIn("invoiced in Xero", draft["note"])
+        self.assertEqual(draft["note"], "PO 123")
         self.assertNotIn("email", draft)
+
+    def test_no_note_typed_means_no_note_at_all(self):
+        self.proposal["payload"]["note"] = None
+        self.run_execute("create_paid")
+        self.assertEqual(self.created[0]["note"], "")
 
     def test_no_approve_role_writes_nothing(self):
         user = {**self.APPROVER, "roles": ["orders.use"]}
@@ -575,7 +579,7 @@ class IndividualCustomerTests(unittest.TestCase):
              mock.patch.object(entry.shop, "complete_draft", return_value={"id": "gid://shopify/Order/3", "name": "#2001", "legacyResourceId": "3"}), \
              mock.patch.object(entry, "admin_order_url", side_effect=lambda legacy: f"https://admin.example/orders/{legacy}"):
             result = entry.execute(approver, {"id": "slack:C0SALES:1.1", "source": "slack", "visibility": "channel"}, "create_unpaid", proposal, "r1")
-        self.assertIn("Pat Example", result["text"])
+        self.assertEqual(result["text"], "Success: <https://admin.example/orders/3|Order #2001> created (unpaid)")
         self.assertEqual(created[0]["purchasingEntity"], {"customerId": CUSTOMER})
         self.assertEqual(created[0]["paymentTerms"], {"paymentTermsTemplateId": TERMS["id"]})
 
