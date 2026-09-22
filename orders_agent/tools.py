@@ -383,6 +383,57 @@ def build_server(ctx, state=None):
                 reply += " Warnings shown to the user: " + " ".join(result["warnings"])
             return {"content": [{"type": "text", "text": reply}]}
 
+        async def prepare_order_edit(args):
+            audit_tool(ctx, "prepare_order_edit", ORDER_ENTRY, allowed=True)
+            try:
+                result = await asyncio.to_thread(
+                    entry.prepare_order_edit, ctx, args.get("order", ""), args.get("changes"),
+                )
+            except (entry.EntryError, shopify.ShopifyError) as exc:
+                log.warning("prepare_order_edit refused for %s: %s", ctx.user_id, str(exc)[:500])
+                return _error(str(exc))
+            state.proposal = result["proposal"]
+            state.text = result["text"]
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "The edit is priced and will be posted for approval with a button. "
+                        "Do not repeat the figures. Say nothing more than one short line.",
+                    }
+                ]
+            }
+
+        add(
+            "prepare_order_edit",
+            "Change the lines on an EXISTING, already-created order: change a line's quantity (0 removes "
+            "it), or add a new product. Nothing is saved until a person with approval rights presses a "
+            "button. Only works on an order that is still unpaid - a paid order can't be edited here. Use "
+            "get_order first to see what's currently on it, and find_variant to resolve a product name to "
+            "its variant_id (the same variant_id as an existing line means 'change that line'; a variant_id "
+            "not currently on the order means 'add it'). Call again with the FULL corrected change list "
+            "whenever the user asks for something different, which replaces the draft.",
+            _schema(
+                {
+                    "order": {**STRING, "description": "The order number, with or without # (from get_order or search_orders)."},
+                    "changes": {
+                        "type": "array",
+                        "description": "One entry per product being changed or added.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "variant_id": {**STRING, "description": "From find_variant."},
+                                "quantity": {**INTEGER, "description": "The new total quantity for this product. 0 removes it."},
+                            },
+                            "required": ["variant_id", "quantity"],
+                        },
+                    },
+                },
+                required=["order", "changes"],
+            ),
+            prepare_order_edit,
+        )
+
         add(
             "prepare_draft_order",
             "Price a draft order for an existing customer and put it up for approval. Nothing is created "
