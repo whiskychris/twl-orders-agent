@@ -20,10 +20,11 @@ still offers them), install it on the store, and grant only these scopes:
 | `read_publications` | which catalogs (Trade Core, Trade IBs, Trade Special Releases) a product is published to, for product picking |
 | `write_draft_orders` | pricing a draft (nothing saved) and, after approval only, creating and completing it |
 | `write_order_edits` | editing an existing, unpaid order (`orderEditBegin`/`orderEditAddVariant`/`orderEditSetQuantity`/`orderEditCommit`) - a distinct scope from `write_orders`, found live: Shopify refused with "missing permission" until this was added |
+| `write_inventory` | updating an on-hand quantity (`inventorySetQuantities`/`inventoryAdjustQuantities`) - read by `twl-inventory-agent`, a separate service sharing this same credential, not by this repo's own code. See that repo's `docs/inventory.md`. |
 
-`write_draft_orders` is the only write scope. No model tool can use it: it is called only from
-`orders_agent/entry.py` in `/v1/act`, after a person with the approve role presses a button
-(`docs/order-entry.md`). Never add other write scopes without a matching, approval-gated code path.
+Every write scope is used from exactly one deterministic code path, in `/v1/act`, after a person with
+the matching approve role presses a button - never from a model tool. Never add a write scope without a
+matching, approval-gated code path.
 
 ## Credentials
 Store them in Secret Manager as `twl-shopify-config`, either:
