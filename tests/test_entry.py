@@ -465,12 +465,14 @@ class MarkOrderPaidTests(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def run_mark(self, order_id=None, user=None, conversation=None):
+    def run_mark(self, order_id=None, order_name="#1234", user=None, conversation=None):
         with mock.patch.object(
             entry.shop, "mark_paid",
             return_value={"id": order_id or self.ORDER_ID, "name": "#1234", "legacyResourceId": "9", "displayFinancialStatus": "PAID"},
         ) as mark_paid:
-            result = entry.mark_order_paid(user or self.APPROVER, conversation or self.CONVERSATION, order_id or self.ORDER_ID, "req1")
+            result = entry.mark_order_paid(
+                user or self.APPROVER, conversation or self.CONVERSATION, order_id or self.ORDER_ID, order_name, "req1",
+            )
         return result, mark_paid
 
     def test_marks_the_order_paid(self):
@@ -483,39 +485,255 @@ class MarkOrderPaidTests(unittest.TestCase):
         user = {**self.APPROVER, "roles": ["orders.use"]}
         with mock.patch.object(entry.shop, "mark_paid") as mark_paid:
             with self.assertRaises(entry.ActRefused):
-                entry.mark_order_paid(user, self.CONVERSATION, self.ORDER_ID, "req1")
+                entry.mark_order_paid(user, self.CONVERSATION, self.ORDER_ID, "#1234", "req1")
         mark_paid.assert_not_called()
 
     def test_no_order_entry_capability_refuses(self):
         user = {**self.APPROVER, "user_id": "twl:reader"}
         with mock.patch.object(entry.shop, "mark_paid") as mark_paid:
             with self.assertRaises(entry.ActRefused):
-                entry.mark_order_paid(user, self.CONVERSATION, self.ORDER_ID, "req1")
+                entry.mark_order_paid(user, self.CONVERSATION, self.ORDER_ID, "#1234", "req1")
         mark_paid.assert_not_called()
 
     def test_a_malformed_order_id_is_refused_before_calling_shopify(self):
         for bad in (None, "", "1234", "#1234", "gid://shopify/DraftOrder/9", "gid://shopify/Order/abc"):
             with mock.patch.object(entry.shop, "mark_paid") as mark_paid:
                 with self.assertRaises(entry.ActRefused, msg=str(bad)):
-                    entry.mark_order_paid(self.APPROVER, self.CONVERSATION, bad, "req1")
+                    entry.mark_order_paid(self.APPROVER, self.CONVERSATION, bad, "#1234", "req1")
             mark_paid.assert_not_called()
 
-    def test_shopify_refusing_is_a_clean_refusal(self):
+    def test_shopify_refusing_points_at_marking_it_paid_by_hand(self):
+        # Found live: orderMarkAsPaid needs a Shopify staff permission this app doesn't have yet.
+        # The raw API error isn't actionable on its own, so this should name the order and link
+        # straight to it in the Shopify admin, not just relay the API's error text.
         with mock.patch.object(
             entry.shop, "mark_paid",
-            side_effect=ShopifyError("Shopify would not mark the order paid: already paid"),
-        ):
-            with self.assertRaises(entry.ActRefused):
-                entry.mark_order_paid(self.APPROVER, self.CONVERSATION, self.ORDER_ID, "req1")
+            side_effect=ShopifyError("Access denied for orderMarkAsPaid field. Required access: write_orders access scope."),
+        ), mock.patch.object(entry, "admin_order_url", return_value="https://admin.example/orders/9"):
+            with self.assertRaises(entry.ActRefused) as caught:
+                entry.mark_order_paid(self.APPROVER, self.CONVERSATION, self.ORDER_ID, "#1234", "req1")
+        message = str(caught.exception)
+        self.assertIn("#1234", message)
+        self.assertIn("https://admin.example/orders/9", message)
+        self.assertIn("Access denied", message)
 
     def test_an_unlisted_channel_refuses(self):
         with mock.patch.object(entry.shop, "mark_paid") as mark_paid:
             with self.assertRaises(entry.ActRefused):
                 entry.mark_order_paid(
                     self.APPROVER, {"id": "slack:C0RANDOM:1.1", "source": "slack", "visibility": "channel"},
-                    self.ORDER_ID, "req1",
+                    self.ORDER_ID, "#1234", "req1",
                 )
         mark_paid.assert_not_called()
+
+
+ORDER_EDIT_ID = "gid://shopify/Order/9"
+LINE_ITEM_A = "gid://shopify/LineItem/1"
+MONEY_NODE = lambda amount, currency="AUD": {"shopMoney": {"amount": amount, "currencyCode": currency}}  # noqa: E731
+
+
+def edit_order(**over):
+    base = {
+        "id": ORDER_EDIT_ID, "name": "#1234", "financial_status": "PENDING",
+        "lines": [{"line_item_id": LINE_ITEM_A, "title": "Arran 10", "quantity": 6, "variant_id": VARIANT_A}],
+    }
+    return {**base, **over}
+
+
+def calc_snapshot(line_items=None, added=None, total="782.10"):
+    return {
+        "totalPriceSet": MONEY_NODE(total),
+        "lineItems": {"nodes": line_items or []},
+        "addedLineItems": {"nodes": added or []},
+    }
+
+
+def calc_line(variant_id, title, quantity, unit_price="86.90", line_total=None):
+    line_total = line_total or str(round(float(unit_price) * quantity, 2))
+    return {
+        "id": f"gid://shopify/LineItem/{variant_id[-1]}", "title": title, "quantity": quantity,
+        "variant": {"id": variant_id}, "discountedUnitPriceSet": MONEY_NODE(unit_price), "editableSubtotalSet": MONEY_NODE(line_total),
+    }
+
+
+class PrepareOrderEditTests(unittest.TestCase):
+    def prepare(self, order=None, changes=None, calculated_order_id="calc-1", snap=None):
+        changes = changes if changes is not None else [{"variant_id": VARIANT_A, "quantity": 12}]
+        snap = snap if snap is not None else calc_snapshot(
+            line_items=[calc_line(VARIANT_A, "Arran 10", 12, line_total="1042.80")],
+        )
+        with mock.patch.object(entry.order_editing, "find_order_for_edit", return_value=order or edit_order()), \
+             mock.patch.object(entry.order_editing, "begin_edit", return_value=calculated_order_id) as begin, \
+             mock.patch.object(entry.order_editing, "set_quantity") as set_qty, \
+             mock.patch.object(entry.order_editing, "add_variant") as add_var, \
+             mock.patch.object(entry.order_editing, "snapshot", return_value=snap):
+            result = entry.prepare_order_edit(ctx(), "#1234", changes)
+        return result, begin, set_qty, add_var
+
+    def test_a_quantity_change_on_an_existing_line_becomes_a_proposal(self):
+        result, begin, set_qty, add_var = self.prepare()
+        proposal = result["proposal"]
+        self.assertEqual(proposal["kind"], "order_edit")
+        self.assertEqual([c["id"] for c in proposal["choices"]], ["approve_edit"])
+        self.assertEqual(proposal["payload"]["order_id"], ORDER_EDIT_ID)
+        self.assertEqual(proposal["payload"]["changes"], [{"variant_id": VARIANT_A, "quantity": 12}])
+        self.assertEqual(proposal["payload"]["expected_total"], "782.10")
+        set_qty.assert_called_once_with("calc-1", LINE_ITEM_A, 12)
+        add_var.assert_not_called()
+        self.assertIn("Arran 10: 6 → 12", result["text"])
+        self.assertIn("New total 782.10 AUD", result["text"])
+
+    def test_adding_a_new_variant_calls_add_variant_not_set_quantity(self):
+        new_variant = "gid://shopify/ProductVariant/99"
+        snap = calc_snapshot(
+            line_items=[calc_line(VARIANT_A, "Arran 10", 6, line_total="521.40")],
+            added=[calc_line(new_variant, "GlenAllachie 12", 3, unit_price="70.00", line_total="210.00")],
+            total="731.40",
+        )
+        result, begin, set_qty, add_var = self.prepare(changes=[{"variant_id": new_variant, "quantity": 3}], snap=snap)
+        set_qty.assert_not_called()
+        add_var.assert_called_once_with("calc-1", new_variant, 3)
+        self.assertIn("Add 3 × GlenAllachie 12", result["text"])
+
+    def test_setting_quantity_to_zero_reads_as_a_removal(self):
+        snap = calc_snapshot(line_items=[calc_line(VARIANT_A, "Arran 10", 0, line_total="0.00")], total="0.00")
+        result, *_ = self.prepare(changes=[{"variant_id": VARIANT_A, "quantity": 0}], snap=snap)
+        self.assertIn("Remove Arran 10 (was 6)", result["text"])
+
+    def test_removing_a_variant_not_on_the_order_refuses(self):
+        with self.assertRaises(entry.EntryError):
+            self.prepare(changes=[{"variant_id": "gid://shopify/ProductVariant/404", "quantity": 0}])
+
+    def test_a_paid_order_refuses_before_any_edit_call(self):
+        with mock.patch.object(entry.order_editing, "find_order_for_edit", return_value=edit_order(financial_status="PAID")), \
+             mock.patch.object(entry.order_editing, "begin_edit") as begin:
+            with self.assertRaises(entry.EntryError):
+                entry.prepare_order_edit(ctx(), "#1234", [{"variant_id": VARIANT_A, "quantity": 12}])
+        begin.assert_not_called()
+
+    def test_no_actual_change_refuses(self):
+        snap = calc_snapshot(line_items=[calc_line(VARIANT_A, "Arran 10", 6, line_total="521.40")], total="521.40")
+        with self.assertRaises(entry.EntryError):
+            self.prepare(changes=[{"variant_id": VARIANT_A, "quantity": 6}], snap=snap)
+
+    def test_no_capability_refuses(self):
+        with self.assertRaises(entry.EntryError):
+            entry.prepare_order_edit(ctx(capabilities=("orders",)), "#1234", [{"variant_id": VARIANT_A, "quantity": 12}])
+
+    def test_malformed_changes_are_refused(self):
+        for bad in ([], None, [{"variant_id": "not-a-gid", "quantity": 1}], [{"variant_id": VARIANT_A, "quantity": -1}], [{"variant_id": VARIANT_A, "quantity": "many"}]):
+            with mock.patch.object(entry.order_editing, "find_order_for_edit") as find_order:
+                with self.assertRaises(entry.EntryError, msg=repr(bad)):
+                    entry.prepare_order_edit(ctx(), "#1234", bad)
+            find_order.assert_not_called()
+
+    def test_too_many_changes_refuses(self):
+        changes = [{"variant_id": f"gid://shopify/ProductVariant/{n}", "quantity": 1} for n in range(31)]
+        with mock.patch.object(entry.order_editing, "find_order_for_edit") as find_order:
+            with self.assertRaises(entry.EntryError):
+                entry.prepare_order_edit(ctx(), "#1234", changes)
+        find_order.assert_not_called()
+
+    def test_shopify_refusing_becomes_a_clean_refusal(self):
+        with mock.patch.object(entry.order_editing, "find_order_for_edit", side_effect=ShopifyError("not found")):
+            with self.assertRaises(entry.EntryError):
+                entry.prepare_order_edit(ctx(), "#9999", [{"variant_id": VARIANT_A, "quantity": 1}])
+
+
+def make_edit_proposal(order=None, changes=None):
+    result, *_ = PrepareOrderEditTests().prepare(order=order, changes=changes)
+    return {"token": "orders-edit-1-v1", **result["proposal"]}
+
+
+class ExecuteOrderEditTests(unittest.TestCase):
+    APPROVER = {"id": "U1", "user_id": "twl:jimmy-shore", "name": "Jimmy Shore", "roles": ["orders.use", "orders.approve"]}
+    CONVERSATION = {"id": "slack:C0SALES:1.1", "source": "slack", "visibility": "channel"}
+
+    def setUp(self):
+        for patch in (
+            mock.patch.object(authorization, "get_authz_config", return_value=USERS),
+            mock.patch.object(authorization, "get_order_entry_channels", return_value=frozenset({"C0SALES"})),
+            mock.patch.object(entry, "admin_order_url", side_effect=lambda legacy: f"https://admin.example/orders/{legacy}"),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.proposal = make_edit_proposal()
+
+    def run_execute(self, choice="approve_edit", proposal=None, order=None, snap=None, committed=None):
+        order = order or edit_order()
+        snap = snap or calc_snapshot(line_items=[calc_line(VARIANT_A, "Arran 10", 12, line_total="1042.80")], total="782.10")
+        committed = committed or {"id": ORDER_EDIT_ID, "name": "#1234", "legacyResourceId": "9", "displayFinancialStatus": "PENDING", "totalPriceSet": MONEY_NODE("782.10")}
+        with mock.patch.object(entry.order_editing, "find_order_for_edit", return_value=order), \
+             mock.patch.object(entry.order_editing, "begin_edit", return_value="calc-1") as begin, \
+             mock.patch.object(entry.order_editing, "set_quantity") as set_qty, \
+             mock.patch.object(entry.order_editing, "add_variant") as add_var, \
+             mock.patch.object(entry.order_editing, "snapshot", return_value=snap), \
+             mock.patch.object(entry.order_editing, "commit_edit", return_value=committed) as commit:
+            result = entry.execute(self.APPROVER, self.CONVERSATION, choice, proposal or self.proposal, "req1")
+        return result, commit
+
+    def test_commits_and_reports_success(self):
+        result, commit = self.run_execute()
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("#1234", result["text"])
+        self.assertIn("https://admin.example/orders/9", result["text"])
+        commit.assert_called_once_with("calc-1", notify_customer=False)
+
+    def test_an_unknown_choice_is_refused(self):
+        with mock.patch.object(entry.order_editing, "begin_edit") as begin:
+            with self.assertRaises(entry.ActRefused):
+                entry.execute(self.APPROVER, self.CONVERSATION, "approve_all", self.proposal, "req1")
+        begin.assert_not_called()
+
+    def test_no_approve_role_writes_nothing(self):
+        user = {**self.APPROVER, "roles": ["orders.use"]}
+        with mock.patch.object(entry.order_editing, "begin_edit") as begin:
+            with self.assertRaises(entry.ActRefused):
+                entry.execute(user, self.CONVERSATION, "approve_edit", self.proposal, "req1")
+        begin.assert_not_called()
+
+    def test_a_paid_order_refuses_and_commits_nothing(self):
+        with self.assertRaises(entry.ActRefused):
+            self.run_execute(order=edit_order(financial_status="PAID"))
+
+    def test_a_total_mismatch_refuses_and_does_not_commit(self):
+        mismatched = calc_snapshot(line_items=[calc_line(VARIANT_A, "Arran 10", 12, line_total="9999.00")], total="9999.00")
+        with self.assertRaises(entry.ActRefused):
+            self.run_execute(snap=mismatched)
+
+    def test_shopify_refusing_is_a_clean_refusal(self):
+        with mock.patch.object(entry.order_editing, "find_order_for_edit", side_effect=ShopifyError("boom")):
+            with self.assertRaises(entry.ActRefused):
+                entry.execute(self.APPROVER, self.CONVERSATION, "approve_edit", self.proposal, "req1")
+
+    def test_a_repeated_approval_is_a_no_op_second_time(self):
+        # Quantities are absolute targets, so re-running the same changes against an order that
+        # already matches them stages nothing - idempotent by construction, no dedup token needed.
+        already_applied = edit_order(lines=[{"line_item_id": LINE_ITEM_A, "title": "Arran 10", "quantity": 12, "variant_id": VARIANT_A}])
+        snap = calc_snapshot(line_items=[calc_line(VARIANT_A, "Arran 10", 12, line_total="1042.80")], total="782.10")
+        with mock.patch.object(entry.order_editing, "find_order_for_edit", return_value=already_applied), \
+             mock.patch.object(entry.order_editing, "begin_edit", return_value="calc-1"), \
+             mock.patch.object(entry.order_editing, "set_quantity") as set_qty, \
+             mock.patch.object(entry.order_editing, "snapshot", return_value=snap), \
+             mock.patch.object(entry.order_editing, "commit_edit", return_value={"id": ORDER_EDIT_ID, "name": "#1234", "legacyResourceId": "9"}):
+            entry.execute(self.APPROVER, self.CONVERSATION, "approve_edit", self.proposal, "req1")
+        set_qty.assert_not_called()
+
+    def test_a_malformed_payload_is_refused(self):
+        for mutate in (
+            lambda p: p.update(version=2),
+            lambda p: p.pop("order_id"),
+            lambda p: p.update(order_id="gid://shopify/DraftOrder/9"),
+            lambda p: p.update(changes=[]),
+            lambda p: p["changes"][0].update(quantity=-1),
+            lambda p: p.pop("expected_total"),
+        ):
+            proposal = {**self.proposal, "payload": __import__("copy").deepcopy(self.proposal["payload"])}
+            mutate(proposal["payload"])
+            with mock.patch.object(entry.order_editing, "begin_edit") as begin:
+                with self.assertRaises(entry.ActRefused):
+                    entry.execute(self.APPROVER, self.CONVERSATION, "approve_edit", proposal, "req1")
+            begin.assert_not_called()
 
 
 CUSTOMER = "gid://shopify/Customer/77"
@@ -957,7 +1175,7 @@ class EndpointTests(unittest.TestCase):
             response = self.message(
                 text="Mark order #1234 as paid.",
                 roles=("orders.use", "orders.approve"),
-                context={"action": "mark_order_paid", "order_id": "gid://shopify/Order/9"},
+                context={"action": "mark_order_paid", "order_id": "gid://shopify/Order/9", "order_name": "#1234"},
             )
         body = response.get_json()
         self.assertIn("#1234", body["text"])

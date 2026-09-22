@@ -121,7 +121,7 @@ def v1_message():
     context = data.get("context") if isinstance(data.get("context"), dict) else {}
     if context.get("action") == "mark_order_paid":
         try:
-            result = entry.mark_order_paid(user, conversation, context.get("order_id"), request_id)
+            result = entry.mark_order_paid(user, conversation, context.get("order_id"), context.get("order_name"), request_id)
         except entry.ActRefused as exc:
             # A refusal is an answer, not an error, so the person sees why.
             return jsonify(text=str(exc))

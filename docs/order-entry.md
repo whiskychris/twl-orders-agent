@@ -100,9 +100,37 @@ the order to mark paid in structured data (never free text a model would have to
 `mark_order_paid` in `orders_agent/entry.py`. This agent never touches Xero itself; it only creates the
 Shopify order and, on that handoff back, marks it paid.
 
-**Not deployed yet:** `twl-invoicing-agent` doesn't exist as a live service yet. Until it does, Approve &
-Send Invoice will create the order but the handoff will fail quietly (the gateway falls back to the plain
-"order created" message) - use Approve Order Only until invoicing agent is live.
+**`orderMarkAsPaid` currently fails on a Shopify permission, not a bug.** Found live: this mutation needs
+`write_orders` (already in `shopify.app.toml`) **and** a separate Shopify staff permission,
+`mark_orders_as_paid`, which isn't the store owner's own permission and isn't self-serve from Settings >
+Users and permissions - check Settings > Apps and sales channels > Develop apps > TWL Orders Agent for an
+additional permission request there, or otherwise treat it as a Shopify support question. Until it's
+granted, `mark_order_paid` refuses with a friendly message naming the order and linking straight to it in
+the Shopify admin, rather than relaying Shopify's raw API error - the invoice has already been sent by
+this point either way, so it's a manual "mark it paid yourself" step, not a lost order.
+
+## Editing an existing order
+Sales can ask to change an order that's already been created but not yet paid: `"orders: on #1234, change Arran 10
+to 12"`, `"add 3 x GlenAllachie 12 to #1234"`, `"remove Arran 10 from #1234"`. The model has one tool for this,
+`prepare_order_edit`, alongside the existing `get_order` (to see current lines) and `find_variant` (to resolve a
+product name to the id a change needs). Sending the **same variant id as an existing line** means "change that
+line's quantity"; any other variant id means "add a new line". Setting a line's quantity to `0` removes it - there
+is no separate remove tool, matching Shopify's own API shape.
+
+1. **Unpaid orders only.** If the order's `displayFinancialStatus` is `PAID`, the request is refused before any
+   edit call is made. This keeps editing away from orders that are already invoiced and dispatch-ready.
+2. **Priced by Shopify, not the model**, the same as a new order. `prepare_order_edit` uses Shopify's own staged
+   Order Editing API (`orderEditBegin` -> `orderEditSetQuantity`/`orderEditAddVariant` -> a snapshot of the
+   calculated order) to build the preview, so the draft's new line totals and new order total are Shopify's own
+   numbers, not computed here.
+3. **Re-checked before committing.** `execute()` never reuses the calculated order from the preview - on approval
+   it re-fetches the live order, re-runs the whole begin/stage sequence from the approved `{variant_id: quantity}`
+   changes, and re-verifies the total against what was approved before calling `orderEditCommit`. If the order
+   moved (someone else edited it, a price changed) the total won't match and nothing is committed.
+4. **Silent commit.** The edit commits with `notifyCustomer: false` - the customer is not emailed about the
+   change. Shopify's own order-created and payment notifications still apply as usual.
+5. **Discounts are out of scope for v1.** This only changes quantities and adds plain lines at Shopify's normal
+   price for that line. Up to 30 line changes per request.
 
 ## Customer emails
 Customers are emailed by Shopify's usual order notifications when the order is **created**, not while it is a
@@ -134,5 +162,6 @@ company ("The Whisky List") and check:
    appears in the same thread, and once that's approved and sent, the Shopify order comes back marked paid.
 
 ## Not covered
-New customers, shipping charges, delivery dates, editing or cancelling an existing order, and refunds.
-Anything to do with the Xero invoice itself is `twl-invoicing-agent`'s job, not this agent's.
+New customers, shipping charges, delivery dates, discounts on an edit, cancelling an existing order, and
+refunds. Editing a **paid** order is refused, not supported. Anything to do with the Xero invoice itself is
+`twl-invoicing-agent`'s job, not this agent's.

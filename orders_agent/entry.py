@@ -34,6 +34,7 @@ from .authorization import ORDER_ENTRY, AuthorizationError, audit, resolve_conte
 from .config import APPROVE_ROLE, get_shopify_config
 from .product_pick import format_eta
 from .sources import draft_orders as shop
+from .sources import order_edit as order_editing
 from .sources.shopify import ShopifyError
 
 GID = {
@@ -437,13 +438,24 @@ def _result(order, invoicing, prefix=""):
 
 
 def execute(user, conversation, choice, proposal, request_id):
+    """Dispatches by proposal kind. Raises ActRefused (nothing changed, or the outcome needs a person
+    to check Shopify). Any other exception means the outcome is unknown."""
+    ctx = _authorize(user, conversation, request_id)
+    if not isinstance(proposal, dict):
+        raise ActRefused("That isn't a draft, so I did nothing.")
+    kind = proposal.get("kind")
+    if kind == "order_edit":
+        return _execute_order_edit(ctx, choice, proposal, request_id)
+    if kind != "draft_order":
+        raise ActRefused("That isn't an order draft, so I did nothing.")
+    return _execute_create_order(ctx, choice, proposal, request_id)
+
+
+def _execute_create_order(ctx, choice, proposal, request_id):
     """Create the order for an approved draft. Raises ActRefused (nothing created, or the draft exists but
     was not completed). Any other exception means the outcome is unknown."""
-    ctx = _authorize(user, conversation, request_id)
     if choice not in CHOICE_IDS:
         raise ActRefused("I need to know whether to approve and invoice, or approve only. Use one of the buttons.")
-    if not isinstance(proposal, dict) or proposal.get("kind") != "draft_order":
-        raise ActRefused("That isn't an order draft, so I did nothing.")
     token = str(proposal.get("token", ""))
     if not TOKEN.match(token):
         raise ActRefused("That draft has no valid reference, so I did nothing.")
@@ -499,7 +511,7 @@ def execute(user, conversation, choice, proposal, request_id):
 ORDER_ID = re.compile(r"^gid://shopify/Order/\d+$")
 
 
-def mark_order_paid(user, conversation, order_id, request_id):
+def mark_order_paid(user, conversation, order_id, order_name, request_id):
     """Mark an existing Shopify order paid. The only caller is the gateway's handoff relay, right
     after the invoicing agent has actually created and sent the Xero invoice for this order - never
     the model, and never from free text: `order_id` comes from the handoff's structured `context`,
@@ -516,11 +528,216 @@ def mark_order_paid(user, conversation, order_id, request_id):
         raise ActRefused("Marking orders paid isn't available in this conversation.")
     if not ORDER_ID.match(str(order_id or "")):
         raise ActRefused("That doesn't look like a Shopify order id, so I did nothing.")
+    name = str(order_name or "").strip() or "the order"
 
     try:
         order = shop.mark_paid(order_id)
     except ShopifyError as exc:
-        raise ActRefused(str(exc)) from None
+        # Found live: orderMarkAsPaid needs a Shopify staff permission (mark_orders_as_paid) that
+        # isn't the same thing as write_orders or the store owner's own permissions, and isn't
+        # self-serve from Users and permissions - Shopify support territory, not a code fix. A raw
+        # API error here isn't actionable, so point at doing it by hand instead of just relaying it.
+        url = admin_order_url(order_id.rsplit("/", 1)[-1])
+        raise ActRefused(
+            f"The invoice is sent, but I can't mark order {name} paid automatically yet ({exc}). Mark it "
+            f"paid yourself so it can be dispatched: <{url}|Open {name} in Shopify>."
+        ) from None
 
     audit("order_entry", request_id, ctx.user_id, ctx.source, ctx.visibility, action="marked_paid", order=order["name"])
     return {"text": f"Order *{order['name']}* is marked paid and ready to dispatch."}
+
+
+# --- editing an existing, already-created order -------------------------------------------------------
+#
+# Unpaid orders only - once an order is paid it's on its way to being dispatched, and this process
+# never touches a paid order (see order_editing.py). notifyCustomer is always false: these are edits
+# to an order before it's been invoiced, not a change the customer needs telling about here.
+
+EDIT_CHOICES = [{"id": "approve_edit", "label": "Approve Edit", "style": "primary"}]
+EDIT_CHOICE_IDS = frozenset(choice["id"] for choice in EDIT_CHOICES)
+MAX_EDIT_LINES = 30
+
+
+def _edit_preview_lines(snapshot, existing_by_variant):
+    """The lines that actually changed, from Shopify's own post-staging numbers - existing lines
+    whose quantity moved (0 means removed), plus every newly-added line."""
+    lines = []
+    for node in (snapshot.get("lineItems") or {}).get("nodes") or []:
+        variant_id = (node.get("variant") or {}).get("id")
+        prior = existing_by_variant.get(variant_id)
+        before = prior["quantity"] if prior else 0
+        if node["quantity"] == before:
+            continue
+        lines.append(
+            {
+                "title": node["title"], "before": before, "quantity": node["quantity"],
+                "unit_price": Decimal(str(node["discountedUnitPriceSet"]["shopMoney"]["amount"])),
+                "line_total": Decimal(str(node["editableSubtotalSet"]["shopMoney"]["amount"])),
+            }
+        )
+    for node in (snapshot.get("addedLineItems") or {}).get("nodes") or []:
+        lines.append(
+            {
+                "title": node["title"], "before": 0, "quantity": node["quantity"],
+                "unit_price": Decimal(str(node["discountedUnitPriceSet"]["shopMoney"]["amount"])),
+                "line_total": Decimal(str(node["editableSubtotalSet"]["shopMoney"]["amount"])),
+            }
+        )
+    return lines
+
+
+def render_order_edit(order_name, lines, total, currency):
+    """The edit preview as people read it. Built here, from Shopify's own numbers - never by the
+    model, the same reason the new-order draft text is."""
+    rows = []
+    for number, line in enumerate(lines, 1):
+        if line["quantity"] == 0:
+            rows.append(f"{number}. Remove {line['title']} (was {line['before']})")
+        elif line["before"] == 0:
+            rows.append(f"{number}. Add {line['quantity']} × {line['title']} @ {fmt(line['unit_price'])} → *{fmt(line['line_total'])}*")
+        else:
+            rows.append(f"{number}. {line['title']}: {line['before']} → {line['quantity']} @ {fmt(line['unit_price'])} → *{fmt(line['line_total'])}*")
+    parts = [f"*Edit order {order_name}*", "\n".join(rows), f"*New total {fmt(total)} {currency}*"]
+    return "\n\n".join(parts)
+
+
+def prepare_order_edit(ctx, order_number, raw_changes):
+    """Preview changing an existing order's lines: set an existing line's quantity (0 removes it), or
+    add a new product. Nothing on the real order changes here - Shopify's own staged-edit session
+    (order_editing.py) is used as the read-only preview, the same wall prepare()/execute() have
+    everywhere else in this file. Raises EntryError. Returns {"proposal", "text"}."""
+    if not ctx.has(ORDER_ENTRY):
+        raise EntryError("This user can't edit orders here.")
+    if not isinstance(raw_changes, list) or not raw_changes:
+        raise EntryError("Give me at least one change to make.")
+    if len(raw_changes) > MAX_EDIT_LINES:
+        raise EntryError(f"That's more than {MAX_EDIT_LINES} changes. Split it up.")
+
+    changes = []
+    seen = set()
+    for number, item in enumerate(raw_changes, 1):
+        if not isinstance(item, dict):
+            raise EntryError(f"Change {number} isn't valid.")
+        variant_id = str(item.get("variant_id", "")).strip()
+        if not GID["variant"].match(variant_id):
+            raise EntryError(f"Change {number}: use a variant_id that find_variant returned.")
+        if variant_id in seen:
+            raise EntryError(f"Change {number}: that product already has a change listed. Combine them.")
+        seen.add(variant_id)
+        try:
+            quantity = int(item.get("quantity"))
+        except (TypeError, ValueError):
+            raise EntryError(f"Change {number}: the quantity must be a whole number.") from None
+        if not 0 <= quantity <= MAX_QUANTITY:
+            raise EntryError(f"Change {number}: the quantity must be 0 (to remove it) or up to {MAX_QUANTITY}.")
+        changes.append({"variant_id": variant_id, "quantity": quantity})
+
+    try:
+        order = order_editing.find_order_for_edit(order_number)
+    except ShopifyError as exc:
+        raise EntryError(str(exc)) from None
+    if order["financial_status"] == "PAID":
+        raise EntryError(f"Order {order['name']} is already paid, so I can't edit it here. Edit it directly in Shopify.")
+
+    existing_by_variant = {line["variant_id"]: line for line in order["lines"] if line["variant_id"]}
+
+    try:
+        calculated_order_id = order_editing.begin_edit(order["id"])
+        for change in changes:
+            existing = existing_by_variant.get(change["variant_id"])
+            if existing:
+                if change["quantity"] != existing["quantity"]:
+                    order_editing.set_quantity(calculated_order_id, existing["line_item_id"], change["quantity"])
+            elif change["quantity"] > 0:
+                order_editing.add_variant(calculated_order_id, change["variant_id"], change["quantity"])
+            else:
+                raise EntryError("One of those products isn't on the order, so there's nothing to remove.")
+        final = order_editing.snapshot(calculated_order_id)
+    except ShopifyError as exc:
+        raise EntryError(str(exc)) from None
+
+    lines = _edit_preview_lines(final, existing_by_variant)
+    if not lines:
+        raise EntryError("Those changes match what's already on the order - nothing to do.")
+    total = Decimal(str(final["totalPriceSet"]["shopMoney"]["amount"]))
+    currency = final["totalPriceSet"]["shopMoney"]["currencyCode"]
+
+    payload = {
+        "version": 1, "order_id": order["id"], "order_name": order["name"],
+        "changes": changes, "expected_total": str(total),
+    }
+    text = render_order_edit(order["name"], lines, total, currency)
+    items = [{"id": number, "label": f"{line['quantity']} x {line['title']}"} for number, line in enumerate(lines, 1)]
+    proposal = {"kind": "order_edit", "items": items, "payload": payload, "choices": EDIT_CHOICES}
+    return {"proposal": proposal, "text": text}
+
+
+def _validate_edit_payload(payload):
+    try:
+        if payload.get("version") != 1:
+            raise ValueError("version")
+        order_id = str(payload["order_id"])
+        if not ORDER_ID.match(order_id):
+            raise ValueError("order_id")
+        order_name = str(payload["order_name"])
+        raw_changes = payload["changes"]
+        if not isinstance(raw_changes, list) or not raw_changes:
+            raise ValueError("changes")
+        changes = []
+        for change in raw_changes:
+            variant_id = str(change["variant_id"])
+            if not GID["variant"].match(variant_id):
+                raise ValueError("variant_id")
+            quantity = int(change["quantity"])
+            if not 0 <= quantity <= MAX_QUANTITY:
+                raise ValueError("quantity")
+            changes.append({"variant_id": variant_id, "quantity": quantity})
+        expected_total = Decimal(str(payload["expected_total"]))
+        return order_id, order_name, changes, expected_total
+    except (KeyError, TypeError, ValueError, InvalidOperation):
+        raise ActRefused("That edit draft is malformed, so nothing was changed. Ask me to prepare it again.") from None
+
+
+def _execute_order_edit(ctx, choice, proposal, request_id):
+    """Save an approved edit. Re-derives everything fresh from Shopify - never trusts prepare()'s
+    calculated-order session - then commits. Raises ActRefused (nothing saved, or a staged edit was
+    never committed and is safe to leave). Any other exception means the outcome is unknown."""
+    if choice not in EDIT_CHOICE_IDS:
+        raise ActRefused("I need an approval on the edit. Use the button.")
+    order_id, order_name, changes, expected_total = _validate_edit_payload(proposal.get("payload") or {})
+
+    try:
+        order = order_editing.find_order_for_edit(order_name)
+    except ShopifyError as exc:
+        raise ActRefused(str(exc)) from None
+    if order["id"] != order_id:
+        raise ActRefused("That order has changed since the draft was prepared. Ask me to prepare it again.")
+    if order["financial_status"] == "PAID":
+        raise ActRefused(f"Order {order_name} is already paid, so I did nothing. Edit it directly in Shopify.")
+
+    existing_by_variant = {line["variant_id"]: line for line in order["lines"] if line["variant_id"]}
+
+    try:
+        calculated_order_id = order_editing.begin_edit(order["id"])
+        for change in changes:
+            existing = existing_by_variant.get(change["variant_id"])
+            if existing:
+                if change["quantity"] != existing["quantity"]:
+                    order_editing.set_quantity(calculated_order_id, existing["line_item_id"], change["quantity"])
+            elif change["quantity"] > 0:
+                order_editing.add_variant(calculated_order_id, change["variant_id"], change["quantity"])
+
+        final = order_editing.snapshot(calculated_order_id)
+        total = Decimal(str(final["totalPriceSet"]["shopMoney"]["amount"]))
+        if abs(total - expected_total) > TOLERANCE:
+            raise ActRefused(
+                f"The order's total changed since the draft (it was {fmt(expected_total)}, now {fmt(total)}). "
+                "Nothing was saved - ask me to prepare the edit again."
+            )
+        order_after = order_editing.commit_edit(calculated_order_id, notify_customer=False)
+    except ShopifyError as exc:
+        raise ActRefused(f"{exc} (If an edit was staged it was never committed, and is safe to leave.)") from None
+
+    audit("order_entry", request_id, ctx.user_id, ctx.source, ctx.visibility, action="edited", order=order_name)
+    url = admin_order_url(order_after["legacyResourceId"])
+    return {"status": "ok", "text": f"Success: <{url}|Order {order_after['name']}> updated."}
