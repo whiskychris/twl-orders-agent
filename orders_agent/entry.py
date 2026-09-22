@@ -143,16 +143,24 @@ def clean_lines(raw):
 
 
 def _discount_input(line):
-    """Shopify's appliedDiscount for a line. Fixed amounts are sent as the discount on the WHOLE line, and
-    the preview is checked to confirm Shopify applied them that way."""
+    """Shopify's appliedDiscount for a line. Shopify always treats a line item's FIXED_AMOUNT `value` as
+    an amount PER UNIT, and multiplies it by the line's quantity itself to get the total discount applied
+    - confirmed in Shopify's own docs ("For line item discounts, the value property is applied per
+    individual unit of the item, based on the line item's quantity"). So a per_unit discount is sent
+    exactly as given (Shopify's own multiplication produces the total we want). A line_total discount
+    (a dollar amount off the WHOLE line) is divided by quantity here, at full precision - `value` is a
+    GraphQL Float, not a money type, so this isn't rounded to cents before sending, keeping the total
+    Shopify reports as close to the intended one as a per-unit split allows. Found live: sending the
+    already-multiplied total for per_unit meant Shopify multiplied it by quantity AGAIN (6 x too much
+    for a 6-bottle line), which the pricing check below caught and refused - see docs/order-entry.md."""
     discount = line["discount"]
     if not discount:
         return None
     value = Decimal(discount["value"])
     if discount["type"] == "percent":
         return {"value": float(value), "valueType": "PERCENTAGE", "title": "Sales discount"}
-    total = value * line["quantity"] if discount["type"] == "per_unit" else value
-    return {"value": float(total.quantize(CENTS, rounding=ROUND_HALF_UP)), "valueType": "FIXED_AMOUNT", "title": "Sales discount"}
+    per_unit = value if discount["type"] == "per_unit" else value / line["quantity"]
+    return {"value": float(per_unit), "valueType": "FIXED_AMOUNT", "title": "Sales discount"}
 
 
 def _expected_discount(line, unit_price):

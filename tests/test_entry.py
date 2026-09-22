@@ -84,13 +84,27 @@ class LineTests(unittest.TestCase):
             with self.assertRaises(entry.EntryError, msg=str(broken)[:60]):
                 entry.clean_lines(broken)
 
-    def test_fixed_discounts_go_to_shopify_as_the_whole_line_amount(self):
+    def test_fixed_discounts_are_sent_per_unit_because_shopify_always_multiplies_by_quantity(self):
+        # Found live: sending the already-multiplied total for per_unit made Shopify multiply it by
+        # quantity AGAIN. Shopify's line-item FIXED_AMOUNT value is always per unit - see _discount_input.
         per_unit = entry.clean_lines([{"variant_id": VARIANT_A, "quantity": 6, "discount_type": "per_unit", "discount_value": 5}])[0]
-        self.assertEqual(entry._discount_input(per_unit), {"value": 30.0, "valueType": "FIXED_AMOUNT", "title": "Sales discount"})
+        self.assertEqual(entry._discount_input(per_unit), {"value": 5.0, "valueType": "FIXED_AMOUNT", "title": "Sales discount"})
         line_total = entry.clean_lines([{"variant_id": VARIANT_A, "quantity": 6, "discount_type": "line_total", "discount_value": 12.5}])[0]
-        self.assertEqual(entry._discount_input(line_total)["value"], 12.5)
+        self.assertAlmostEqual(entry._discount_input(line_total)["value"], 12.5 / 6)
         pct = entry.clean_lines([{"variant_id": VARIANT_A, "quantity": 6, "discount_type": "percent", "discount_value": 7.5}])[0]
         self.assertEqual(entry._discount_input(pct)["valueType"], "PERCENTAGE")
+
+    def test_what_shopify_would_actually_apply_matches_what_we_expect(self):
+        # The real regression: multiply _discount_input's sent value back by quantity, the way Shopify's
+        # own FIXED_AMOUNT semantics do, and it must land on _expected_discount's number exactly.
+        for kind, raw_value, quantity in (("per_unit", 7.70, 6), ("line_total", 46.20, 6), ("line_total", 50, 13)):
+            line = entry.clean_lines(
+                [{"variant_id": VARIANT_A, "quantity": quantity, "discount_type": kind, "discount_value": raw_value}]
+            )[0]
+            sent = entry._discount_input(line)["value"]
+            shopify_would_apply = Decimal(str(sent)) * quantity
+            expected = entry._expected_discount(line, Decimal("999"))  # unit_price unused for fixed types
+            self.assertLessEqual(abs(shopify_would_apply - expected), entry.TOLERANCE, (kind, raw_value, quantity))
 
 
 class PricingCheckTests(unittest.TestCase):
