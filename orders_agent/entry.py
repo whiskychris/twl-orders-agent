@@ -263,7 +263,6 @@ def prepare(ctx, raw_target, raw_lines, note=None):
     variants = shop.get_variants([line["variant_id"] for line in lines])
     warnings = []
     tags = {}  # line number -> "Back Order" or "Pre-order" (with ETA), shown on the line itself
-    stock_notes = False
     if subject.get("contact_of"):
         # A company contact ordered as an individual. It is allowed when asked for (typing their email and
         # choosing the personal account), but the approver must see that the company's price list and terms
@@ -285,16 +284,13 @@ def prepare(ctx, raw_target, raw_lines, note=None):
         if info.get("pre_order"):
             eta = f" (ETA {format_eta(info['eta'])})" if info.get("eta") else " (no ETA set)"
             tags[number] = "Pre-order" + eta
-            stock_notes = True
         elif stock is not None and stock <= 0:
             tags[number] = "Back Order"
-            stock_notes = True
         elif stock is not None and stock < line["quantity"]:
             if ctx.has("inventory"):
                 warnings.append(f"Line {number}: only {stock} in stock for {line['quantity']} ordered.")
             else:
                 warnings.append(f"Line {number}: there may not be enough stock for {line['quantity']}.")
-            stock_notes = True
 
     terms = subject["terms"] or shop.default_unpaid_terms()
     payload = {
@@ -315,11 +311,7 @@ def prepare(ctx, raw_target, raw_lines, note=None):
             "total": str(calc["total"]),
         },
     }
-    tip = (
-        "Out-of-stock and pre-order items are usually created as unpaid (waiting to be invoiced)."
-        if stock_notes else None
-    )
-    text = render(payload, calc, warnings, tip)
+    text = render(payload, calc, warnings)
     items = [
         {"id": number, "label": f"{line['quantity']} × {line['title']}"}
         for number, line in enumerate(payload["lines"], 1)
@@ -328,7 +320,7 @@ def prepare(ctx, raw_target, raw_lines, note=None):
     return {"proposal": proposal, "text": text, "warnings": warnings}
 
 
-def render(payload, calc, warnings, tip=None):
+def render(payload, calc, warnings):
     """The draft as people read it. Built here, from Shopify's own numbers."""
     company, place = payload["display"]["name"], payload["display"]["place"]
     head = f"*Draft order for {company}*" + (f" ({place})" if place and place != company else "")
@@ -348,8 +340,6 @@ def render(payload, calc, warnings, tip=None):
     ]
     if warnings:
         parts.append("⚠️ " + " ".join(warnings))
-    if tip:
-        parts.append(tip)
     return "\n\n".join(parts)
 
 
