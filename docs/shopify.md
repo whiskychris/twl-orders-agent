@@ -19,6 +19,7 @@ still offers them), install it on the store, and grant only these scopes:
 | `read_draft_orders` | finding an existing draft order, so a repeated approval never makes two |
 | `read_publications` | which catalogs (Trade Core, Trade IBs, Trade Special Releases) a product is published to, for product picking |
 | `write_draft_orders` | pricing a draft (nothing saved) and, after approval only, creating and completing it |
+| `write_order_edits` | editing an existing, unpaid order (`orderEditBegin`/`orderEditAddVariant`/`orderEditSetQuantity`/`orderEditCommit`) - a distinct scope from `write_orders`, found live: Shopify refused with "missing permission" until this was added |
 
 `write_draft_orders` is the only write scope. No model tool can use it: it is called only from
 `orders_agent/entry.py` in `/v1/act`, after a person with the approve role presses a button
