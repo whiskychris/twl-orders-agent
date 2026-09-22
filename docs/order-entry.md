@@ -10,7 +10,7 @@ after someone with approval rights presses a button is the order created in Shop
 "orders: new order for Nicks Wine Merchants: 6 x Arran 10, 12 x GlenAllachie 12 with 10% off"
    -> draft (priced by Shopify, posted with three buttons)
    -> [Create order (invoiced, paid)] [Create order (not invoiced, unpaid)] [Cancel]
-   -> "Order #1234 is marked as paid (invoiced). Open #1234 in Shopify" (with a link)
+   -> "Success: Order #1234 created (paid)" (Order #1234 links to the order in Shopify)
 ```
 
 ## Who can do what
@@ -78,8 +78,7 @@ companies they are a contact at. Order entry is limited to the people you named 
 are what the drafts already show.
 ## Paid and unpaid
 "Paid" means the order was invoiced through Xero. This agent never touches Xero. It records the choice:
-- **Create (paid):** the draft is completed normally, so Shopify records the order as paid. The order note
-  says "Marked paid: invoiced in Xero" and who approved.
+- **Create (paid):** the draft is completed normally, so Shopify records the order as paid.
 - **Create (unpaid):** the draft gets TWL's own "Due on fulfilment" payment terms (never the customer's own
   terms in Shopify, which this process doesn't otherwise use), so Shopify creates it with payment
   outstanding. It is your back-order / waiting-to-invoice state. The deprecated `paymentPending` argument is
