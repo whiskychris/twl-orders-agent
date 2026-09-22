@@ -45,9 +45,14 @@ shows only the company and location name.
    and terms by accident. They are offered by **email address** instead (see below), where the personal account
    is an explicit choice and the draft warns about it. A customer with no delivery address on file gets a
    warning on the draft, not a refusal.
-4. **Discounts are verified.** Shopify's preview must show the discount as intended (a per-unit dollar
-   amount is sent as the whole-line amount, then checked). If it doesn't match, the draft is refused, never
-   quietly created wrong.
+4. **Discounts are verified.** Shopify always treats a line item's fixed-amount discount `value` as an
+   amount **per unit**, and multiplies it by the line's quantity itself to get the total applied - a
+   `per_unit` discount is sent exactly as given, and a `line_total` discount (dollars off the whole line)
+   is divided by quantity before sending, so Shopify's own multiplication lands back on the intended
+   total. Found live: an earlier version sent the already-multiplied total for `per_unit`, so Shopify
+   multiplied it by quantity again (6x too much on a 6-bottle line) - caught by the check below, so
+   nothing was created wrong, just refused. Shopify's preview is always re-checked against what was
+   intended; if it doesn't match, the draft is refused, never quietly created wrong.
 5. **Approval is a button.** The proposal carries two named choices, so whether to start invoicing is decided
    in the same click as approving. Typed "approve" is refused for this kind of proposal, and typed "cancel"
    works.
