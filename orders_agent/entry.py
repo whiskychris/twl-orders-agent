@@ -298,13 +298,10 @@ def prepare(ctx, raw_target, raw_lines, note=None):
             else:
                 warnings.append(f"Line {number}: there may not be enough stock for {line['quantity']}.")
 
-    terms = subject["terms"] or shop.default_unpaid_terms()
-    if terms.get("type") == "FIXED":
-        # A fixed due date needs a date we don't have. Net and due-on-fulfilment/receipt terms don't.
-        warnings.append(
-            f"This customer's payment terms ({terms['name']}) are due on a fixed date, which order entry "
-            "doesn't set. Creating this unpaid will fail; create it paid, or set the order up in Shopify directly."
-        )
+    # Unpaid orders always use TWL's own "Due on fulfilment" terms, regardless of what's configured for this
+    # customer in Shopify: that field isn't otherwise used, and this avoids terms types order entry can't
+    # support (a fixed due date has no date to send; net terms need an issue date, handled in build_input).
+    terms = shop.default_unpaid_terms()
     payload = {
         "version": 2,
         "target": target,
