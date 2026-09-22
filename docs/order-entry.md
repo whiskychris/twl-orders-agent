@@ -9,8 +9,10 @@ after someone with approval rights presses a button is the order created in Shop
 ```
 "orders: new order for Nicks Wine Merchants: 6 x Arran 10, 12 x GlenAllachie 12 with 10% off"
    -> draft (priced by Shopify, posted with three buttons)
-   -> [Create order (invoiced, paid)] [Create order (not invoiced, unpaid)] [Cancel]
-   -> "Success: Order #1234 created (paid)" (Order #1234 links to the order in Shopify)
+   -> [Approve & Send Invoice] [Approve Order Only] [Cancel]
+   -> "Success: Order #1234 created" (Order #1234 links to the order in Shopify), then, if
+      Approve & Send Invoice was pressed, the invoicing agent's own invoice preview follows in the
+      same message, for its own approval.
 ```
 
 ## Who can do what
@@ -46,8 +48,9 @@ shows only the company and location name.
 4. **Discounts are verified.** Shopify's preview must show the discount as intended (a per-unit dollar
    amount is sent as the whole-line amount, then checked). If it doesn't match, the draft is refused, never
    quietly created wrong.
-5. **Approval is a button.** The proposal carries two named choices, so paid or unpaid is decided in the
-   same click as approving. Typed "approve" is refused for this kind of proposal, and typed "cancel" works.
+5. **Approval is a button.** The proposal carries two named choices, so whether to start invoicing is decided
+   in the same click as approving. Typed "approve" is refused for this kind of proposal, and typed "cancel"
+   works.
 6. **Creating is deterministic and re-checked** (`entry.execute`, from `/v1/act`, no model): the approver's
    role, the capability, the channel, the payload, and the price (if the total changed since the draft,
    nothing is created and you're told to ask again).
@@ -76,15 +79,30 @@ company, and ids.
 **Privacy note:** an email lookup tells whoever has order entry that the address is a customer, their name and the
 companies they are a contact at. Order entry is limited to the people you named and to DMs and #sales, and names
 are what the drafts already show.
-## Paid and unpaid
-"Paid" means the order was invoiced through Xero. This agent never touches Xero. It records the choice:
-- **Create (paid):** the draft is completed normally, so Shopify records the order as paid.
-- **Create (unpaid):** the draft gets TWL's own "Due on fulfilment" payment terms (never the customer's own
-  terms in Shopify, which this process doesn't otherwise use), so Shopify creates it with payment
-  outstanding. It is your back-order / waiting-to-invoice state. The deprecated `paymentPending` argument is
-  not used. Always using the same terms sidesteps two things a customer's own terms could otherwise need: a
-  net terms template (for example "Net 30") needs an issue date, and a fixed-due-date template has no due
-  date to send at all.
+## The order is always created unpaid
+Every order this agent creates is **unpaid** in Shopify, on TWL's own "Due on fulfilment" payment terms -
+never the customer's own terms in Shopify, which this process doesn't otherwise use, and never a choice made
+here any more. Always using the same terms sidesteps two things a customer's own terms could otherwise need:
+a net terms template (for example "Net 30") needs an issue date, and a fixed-due-date template has no due
+date to send at all. The deprecated `paymentPending` argument is not used.
+
+**Being paid is what allows an order to be dispatched**, and that only happens once its Xero invoice has
+actually been sent - this agent does not decide that for itself. The choice made when approving is only
+whether to start invoicing now:
+- **Approve & Send Invoice:** creates the order, then hands the Slack thread to the invoicing agent
+  (`twl-invoicing-agent`), which prepares a Xero invoice for its own, separate approval, and sends it once
+  approved.
+- **Approve Order Only:** creates the order and stops there. It stays unpaid until someone later asks to
+  invoice it.
+
+Either way, once the invoicing agent has actually sent the invoice, it hands the thread back here, naming
+the order to mark paid in structured data (never free text a model would have to parse) - see
+`mark_order_paid` in `orders_agent/entry.py`. This agent never touches Xero itself; it only creates the
+Shopify order and, on that handoff back, marks it paid.
+
+**Not deployed yet:** `twl-invoicing-agent` doesn't exist as a live service yet. Until it does, Approve &
+Send Invoice will create the order but the handoff will fail quietly (the gateway falls back to the plain
+"order created" message) - use Approve Order Only until invoicing agent is live.
 
 ## Customer emails
 Customers are emailed by Shopify's usual order notifications when the order is **created**, not while it is a
@@ -93,23 +111,28 @@ a customer whose email is yours.
 
 ## Shopify setup
 The app needs these extra scopes (already listed in `shopify.app.toml`): `read_companies`,
-`read_draft_orders`, `write_draft_orders`, `read_publications` (product picking reads catalog membership) and
-`write_payment_terms` (needed to create an unpaid draft with payment terms; without it Shopify refuses with
-"The user must have access to set payment terms"). Update the app's scopes with the Shopify CLI
+`read_draft_orders`, `write_draft_orders`, `read_publications` (product picking reads catalog membership),
+`write_payment_terms` (needed to create the order's payment terms; without it Shopify refuses with "The user
+must have access to set payment terms") and `write_orders` (needed for `orderMarkAsPaid`, once the invoicing
+agent hands a completed order back to be marked paid). Update the app's scopes with the Shopify CLI
 (`shopify app deploy`) and approve the new access in the store admin. Until then the tools fail with a
 clear message and nothing is created.
 
 ## Verify on the first real order
 A few behaviours can only be confirmed against the live store. Start with a small order for TWL's own
 company ("The Whisky List") and check:
-1. **Paid vs unpaid.** Paid shows as paid. Unpaid shows an outstanding balance on "Due on fulfilment" terms,
-   regardless of what terms that company has configured in Shopify. If a "paid" order looks pending, tell me.
+1. **The order is created unpaid**, on "Due on fulfilment" terms, regardless of what terms that company has
+   configured in Shopify.
 2. **Discounts and totals.** The draft's numbers match what Shopify shows on the order.
 3. **An individual customer** (one who isn't a company). Confirm normal prices, and that payment terms can
-   be put on their draft. If Shopify refuses terms for individuals, "unpaid" will fail with a clear message.
+   be put on their draft. If Shopify refuses terms for individuals, order creation will fail with a clear
+   message.
 4. **Addresses** carry over from the company location or the customer's default address.
-5. **The customer email** arrives (or doesn't) as Shopify's notification settings say.
+5. **The customer email** arrives (or doesn't) as Shopify's notification settings say - once the order is
+   marked paid, not when it's created.
+6. **Approve & Send Invoice**, once the invoicing agent is live: the handoff reaches it, its invoice preview
+   appears in the same thread, and once that's approved and sent, the Shopify order comes back marked paid.
 
 ## Not covered
-New customers, shipping charges, delivery dates, editing or cancelling an existing order, refunds, and
-checking the invoice actually exists in Xero (the person choosing "paid" is stating it).
+New customers, shipping charges, delivery dates, editing or cancelling an existing order, and refunds.
+Anything to do with the Xero invoice itself is `twl-invoicing-agent`'s job, not this agent's.

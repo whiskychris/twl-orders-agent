@@ -157,11 +157,11 @@ class PrepareTests(unittest.TestCase):
              mock.patch.object(entry.shop, "default_unpaid_terms", return_value=TERMS):
             return entry.prepare(ctx(capabilities), {"company_id": company, "location_id": LOCATION}, lines, "PO 123")
 
-    def test_a_good_draft_becomes_a_proposal_with_paid_and_unpaid_choices(self):
+    def test_a_good_draft_becomes_a_proposal_with_invoice_choices(self):
         result = self.prepare()
         proposal = result["proposal"]
         self.assertEqual(proposal["kind"], "draft_order")
-        self.assertEqual([c["id"] for c in proposal["choices"]], ["create_paid", "create_unpaid"])
+        self.assertEqual([c["id"] for c in proposal["choices"]], ["approve_send_invoice", "approve_only"])
         self.assertEqual(proposal["payload"]["expected"]["total"], "110.00")
         self.assertEqual(proposal["payload"]["requested_by"]["user_id"], "twl:jimmy-shore")
         self.assertIn("Nicks Wine Merchants", result["text"])
@@ -303,42 +303,51 @@ class ExecuteTests(unittest.TestCase):
         self.completed.append(draft_id)
         return {"id": "gid://shopify/Order/9", "name": "#1234", "legacyResourceId": "9", "displayFinancialStatus": "PAID"}
 
-    def run_execute(self, choice="create_paid", user=None, conversation=None, proposal=None):
+    def run_execute(self, choice="approve_only", user=None, conversation=None, proposal=None):
         return entry.execute(user or self.APPROVER, conversation or self.CONVERSATION, choice, proposal or self.proposal, "req1")
 
-    def test_paid_creates_the_order_with_no_payment_terms(self):
-        result = self.run_execute("create_paid")
-        self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["text"], "Success: <https://admin.example/orders/9|Order #1234> created (paid)")
-        self.assertTrue(result["result"]["paid"])
-        self.assertNotIn("paymentTerms", self.created[0])
-        self.assertEqual(self.completed, ["gid://shopify/DraftOrder/5"])
+    def test_the_order_is_always_created_unpaid_with_payment_terms(self):
+        # Both choices create the order the same way - the only difference is whether invoicing starts.
+        for choice in ("approve_send_invoice", "approve_only"):
+            self.created.clear()
+            self.completed.clear()
+            result = self.run_execute(choice)
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(self.created[0]["paymentTerms"], {"paymentTermsTemplateId": TERMS["id"]}, choice)
+            self.assertEqual(self.completed, ["gid://shopify/DraftOrder/5"], choice)
 
-    def test_unpaid_creates_the_order_with_payment_terms(self):
-        result = self.run_execute("create_unpaid")
-        self.assertEqual(result["text"], "Success: <https://admin.example/orders/9|Order #1234> created (unpaid)")
-        self.assertFalse(result["result"]["paid"])
-        self.assertEqual(self.created[0]["paymentTerms"], {"paymentTermsTemplateId": TERMS["id"]})
+    def test_approve_only_reports_created_but_not_invoiced_and_has_no_handoff(self):
+        result = self.run_execute("approve_only")
+        self.assertEqual(result["text"], "Success: <https://admin.example/orders/9|Order #1234> created (not yet invoiced)")
+        self.assertFalse(result["result"]["invoicing"])
+        self.assertNotIn("handoff", result)
 
-    def test_unpaid_with_net_terms_sends_an_issue_date(self):
+    def test_approve_send_invoice_hands_off_to_invoicing(self):
+        result = self.run_execute("approve_send_invoice")
+        self.assertEqual(result["text"], "Success: <https://admin.example/orders/9|Order #1234> created")
+        self.assertTrue(result["result"]["invoicing"])
+        self.assertEqual(
+            result["handoff"],
+            {
+                "agent_id": "invoicing", "text": "Prepare a Xero invoice for Shopify order #1234.",
+                "context": {"action": "prepare_invoice", "order_id": "gid://shopify/Order/9", "order_name": "#1234"},
+            },
+        )
+
+    def test_net_terms_send_an_issue_date(self):
         # Net terms are due a number of days after issue, so Shopify needs an issue date to count from
         # (without it: "An issue date is required with net payment terms").
         self.proposal["payload"]["terms"] = {"id": "gid://shopify/PaymentTermsTemplate/4", "name": "Net 30", "type": "NET"}
-        self.run_execute("create_unpaid")
+        self.run_execute("approve_only")
         terms = self.created[0]["paymentTerms"]
         self.assertEqual(terms["paymentTermsTemplateId"], "gid://shopify/PaymentTermsTemplate/4")
         self.assertEqual(len(terms["paymentSchedules"]), 1)
         self.assertIn("issuedAt", terms["paymentSchedules"][0])
 
-    def test_paid_with_net_terms_sends_no_payment_terms_at_all(self):
-        self.proposal["payload"]["terms"] = {"id": "gid://shopify/PaymentTermsTemplate/4", "name": "Net 30", "type": "NET"}
-        self.run_execute("create_paid")
-        self.assertNotIn("paymentTerms", self.created[0])
-
     def test_the_draft_is_tagged_and_the_note_is_only_what_the_user_typed(self):
         # make_prepared() supplies "PO 123" as the user's note. Nothing else - no "Raised in Slack by...",
         # no "approved by...", no paid/unpaid text - is added.
-        self.run_execute("create_paid")
+        self.run_execute("approve_only")
         draft = self.created[0]
         self.assertIn("smith-orders-20260921-1500-ab12-v1", draft["tags"])
         self.assertEqual(draft["note"], "PO 123")
@@ -346,7 +355,7 @@ class ExecuteTests(unittest.TestCase):
 
     def test_no_note_typed_means_no_note_at_all(self):
         self.proposal["payload"]["note"] = None
-        self.run_execute("create_paid")
+        self.run_execute("approve_only")
         self.assertEqual(self.created[0]["note"], "")
 
     def test_no_approve_role_writes_nothing(self):
@@ -372,7 +381,7 @@ class ExecuteTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
 
     def test_an_unknown_choice_writes_nothing(self):
-        for choice in (None, "", "approve", "create", "create_paid; drop"):
+        for choice in (None, "", "approve", "create", "approve_only; drop"):
             with self.assertRaises(entry.ActRefused, msg=str(choice)):
                 self.run_execute(choice)
         self.assertEqual(self.created, [])
@@ -408,7 +417,7 @@ class ExecuteTests(unittest.TestCase):
     def test_only_order_drafts_with_a_valid_token_are_executed(self):
         for proposal in ({**self.proposal, "kind": "shipment_change_set"}, {**self.proposal, "token": "BAD TOKEN"}, {**self.proposal, "token": ""}, None, "text", []):
             with self.assertRaises(entry.ActRefused, msg=str(proposal)[:40]):
-                entry.execute(self.APPROVER, self.CONVERSATION, "create_paid", proposal, "req1")
+                entry.execute(self.APPROVER, self.CONVERSATION, "approve_only", proposal, "req1")
         self.assertEqual(self.created, [])
 
     def test_a_repeated_approval_returns_the_existing_order(self):
@@ -439,6 +448,74 @@ class ExecuteTests(unittest.TestCase):
         with mock.patch.object(entry.shop, "complete_draft", side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
                 self.run_execute()
+
+
+class MarkOrderPaidTests(unittest.TestCase):
+    """The deterministic handoff-back from invoicing: mark an existing Shopify order paid."""
+
+    APPROVER = {"id": "U1", "user_id": "twl:jimmy-shore", "name": "Jimmy Shore", "roles": ["orders.use", "orders.approve"]}
+    CONVERSATION = {"id": "slack:C0SALES:1.1", "source": "slack", "visibility": "channel"}
+    ORDER_ID = "gid://shopify/Order/9"
+
+    def setUp(self):
+        for patch in (
+            mock.patch.object(authorization, "get_authz_config", return_value=USERS),
+            mock.patch.object(authorization, "get_order_entry_channels", return_value=frozenset({"C0SALES"})),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def run_mark(self, order_id=None, user=None, conversation=None):
+        with mock.patch.object(
+            entry.shop, "mark_paid",
+            return_value={"id": order_id or self.ORDER_ID, "name": "#1234", "legacyResourceId": "9", "displayFinancialStatus": "PAID"},
+        ) as mark_paid:
+            result = entry.mark_order_paid(user or self.APPROVER, conversation or self.CONVERSATION, order_id or self.ORDER_ID, "req1")
+        return result, mark_paid
+
+    def test_marks_the_order_paid(self):
+        result, mark_paid = self.run_mark()
+        self.assertIn("#1234", result["text"])
+        self.assertIn("paid", result["text"])
+        mark_paid.assert_called_once_with(self.ORDER_ID)
+
+    def test_no_approve_role_refuses(self):
+        user = {**self.APPROVER, "roles": ["orders.use"]}
+        with mock.patch.object(entry.shop, "mark_paid") as mark_paid:
+            with self.assertRaises(entry.ActRefused):
+                entry.mark_order_paid(user, self.CONVERSATION, self.ORDER_ID, "req1")
+        mark_paid.assert_not_called()
+
+    def test_no_order_entry_capability_refuses(self):
+        user = {**self.APPROVER, "user_id": "twl:reader"}
+        with mock.patch.object(entry.shop, "mark_paid") as mark_paid:
+            with self.assertRaises(entry.ActRefused):
+                entry.mark_order_paid(user, self.CONVERSATION, self.ORDER_ID, "req1")
+        mark_paid.assert_not_called()
+
+    def test_a_malformed_order_id_is_refused_before_calling_shopify(self):
+        for bad in (None, "", "1234", "#1234", "gid://shopify/DraftOrder/9", "gid://shopify/Order/abc"):
+            with mock.patch.object(entry.shop, "mark_paid") as mark_paid:
+                with self.assertRaises(entry.ActRefused, msg=str(bad)):
+                    entry.mark_order_paid(self.APPROVER, self.CONVERSATION, bad, "req1")
+            mark_paid.assert_not_called()
+
+    def test_shopify_refusing_is_a_clean_refusal(self):
+        with mock.patch.object(
+            entry.shop, "mark_paid",
+            side_effect=ShopifyError("Shopify would not mark the order paid: already paid"),
+        ):
+            with self.assertRaises(entry.ActRefused):
+                entry.mark_order_paid(self.APPROVER, self.CONVERSATION, self.ORDER_ID, "req1")
+
+    def test_an_unlisted_channel_refuses(self):
+        with mock.patch.object(entry.shop, "mark_paid") as mark_paid:
+            with self.assertRaises(entry.ActRefused):
+                entry.mark_order_paid(
+                    self.APPROVER, {"id": "slack:C0RANDOM:1.1", "source": "slack", "visibility": "channel"},
+                    self.ORDER_ID, "req1",
+                )
+        mark_paid.assert_not_called()
 
 
 CUSTOMER = "gid://shopify/Customer/77"
@@ -524,7 +601,7 @@ class IndividualCustomerTests(unittest.TestCase):
              mock.patch.object(entry.shop, "create_draft", side_effect=lambda i: created.append(i) or {"id": "gid://shopify/DraftOrder/8"}), \
              mock.patch.object(entry.shop, "complete_draft", return_value={"id": "gid://shopify/Order/3", "name": "#2002", "legacyResourceId": "3"}), \
              mock.patch.object(entry, "admin_order_url", side_effect=lambda legacy: f"https://admin.example/orders/{legacy}"):
-            result = entry.execute(approver, {"id": "slack:C0SALES:1.1", "source": "slack", "visibility": "channel"}, "create_paid", proposal, "r1")
+            result = entry.execute(approver, {"id": "slack:C0SALES:1.1", "source": "slack", "visibility": "channel"}, "approve_only", proposal, "r1")
         self.assertEqual(result["status"], "ok")
         self.assertEqual(created[0]["purchasingEntity"], {"customerId": CUSTOMER})
 
@@ -578,8 +655,9 @@ class IndividualCustomerTests(unittest.TestCase):
              mock.patch.object(entry.shop, "create_draft", side_effect=lambda i: created.append(i) or {"id": "gid://shopify/DraftOrder/8"}), \
              mock.patch.object(entry.shop, "complete_draft", return_value={"id": "gid://shopify/Order/3", "name": "#2001", "legacyResourceId": "3"}), \
              mock.patch.object(entry, "admin_order_url", side_effect=lambda legacy: f"https://admin.example/orders/{legacy}"):
-            result = entry.execute(approver, {"id": "slack:C0SALES:1.1", "source": "slack", "visibility": "channel"}, "create_unpaid", proposal, "r1")
-        self.assertEqual(result["text"], "Success: <https://admin.example/orders/3|Order #2001> created (unpaid)")
+            result = entry.execute(approver, {"id": "slack:C0SALES:1.1", "source": "slack", "visibility": "channel"}, "approve_send_invoice", proposal, "r1")
+        self.assertEqual(result["text"], "Success: <https://admin.example/orders/3|Order #2001> created")
+        self.assertEqual(result["handoff"]["agent_id"], "invoicing")
         self.assertEqual(created[0]["purchasingEntity"], {"customerId": CUSTOMER})
         self.assertEqual(created[0]["paymentTerms"], {"paymentTermsTemplateId": TERMS["id"]})
 
@@ -779,10 +857,11 @@ class EndpointTests(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def message(self, text="new order for Nicks", open_proposal=None, conversation=None, roles=("orders.use",)):
+    def message(self, text="new order for Nicks", open_proposal=None, conversation=None, roles=("orders.use",), context=None):
         return self.client.post("/v1/message", json={
             "conversation_id": "slack:C0SALES:1.1", "conversation": conversation or self.CONVERSATION,
             "user": {**self.JIMMY, "roles": list(roles)}, "text": text, "open_proposal": open_proposal,
+            "context": context,
         })
 
     def test_a_prepared_draft_is_posted_as_code_written_text_with_the_proposal(self):
@@ -796,7 +875,7 @@ class EndpointTests(unittest.TestCase):
             body = self.message().get_json()
         self.assertEqual(body["text"], "CODE-WRITTEN DRAFT")
         self.assertEqual(body["proposal"]["kind"], "draft_order")
-        self.assertEqual([c["id"] for c in body["proposal"]["choices"]], ["create_paid", "create_unpaid"])
+        self.assertEqual([c["id"] for c in body["proposal"]["choices"]], ["approve_send_invoice", "approve_only"])
         self.assertNotIn("million", str(body))
 
     def test_without_a_draft_the_models_answer_is_used(self):
@@ -832,7 +911,7 @@ class EndpointTests(unittest.TestCase):
             self.message(conversation={"id": "slack:C0OTHER:1.1", "source": "slack", "visibility": "channel"})
         self.assertFalse(seen[0].has("order_entry"))
 
-    def act(self, choice="create_paid", roles=None, conversation=None):
+    def act(self, choice="approve_only", roles=None, conversation=None):
         prepared = make_prepared()
         return self.client.post("/v1/act", json={
             "conversation_id": "slack:C0SALES:1.1", "conversation": conversation or self.CONVERSATION,
@@ -843,9 +922,9 @@ class EndpointTests(unittest.TestCase):
 
     def test_act_success_returns_the_order(self):
         with mock.patch.object(self.main.entry, "execute", return_value={"status": "ok", "text": "Order #1", "result": {}}) as execute:
-            response = self.act("create_unpaid")
+            response = self.act("approve_send_invoice")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(execute.call_args.args[2], "create_unpaid")
+        self.assertEqual(execute.call_args.args[2], "approve_send_invoice")
 
     def test_a_refusal_is_a_4xx_so_the_gateway_says_nothing_was_changed(self):
         with mock.patch.object(self.main.entry, "execute", side_effect=entry.ActRefused("no")):
@@ -870,6 +949,40 @@ class EndpointTests(unittest.TestCase):
             response = self.act(roles=["orders.use"])
         self.assertEqual(response.status_code, 400)
         create_draft.assert_not_called()
+
+    def test_a_mark_order_paid_handoff_bypasses_the_model_entirely(self):
+        order = {"id": "gid://shopify/Order/9", "name": "#1234", "legacyResourceId": "9", "displayFinancialStatus": "PAID"}
+        with mock.patch.object(entry.shop, "mark_paid", return_value=order) as mark_paid, \
+             mock.patch.object(self.main, "run_agent") as run_agent:
+            response = self.message(
+                text="Mark order #1234 as paid.",
+                roles=("orders.use", "orders.approve"),
+                context={"action": "mark_order_paid", "order_id": "gid://shopify/Order/9"},
+            )
+        body = response.get_json()
+        self.assertIn("#1234", body["text"])
+        self.assertIn("paid", body["text"])
+        mark_paid.assert_called_once_with("gid://shopify/Order/9")
+        run_agent.assert_not_called()
+
+    def test_a_mark_order_paid_refusal_is_a_plain_answer_not_an_http_error(self):
+        with mock.patch.object(entry.shop, "mark_paid") as mark_paid:
+            response = self.message(
+                roles=("orders.use",),  # no orders.approve
+                context={"action": "mark_order_paid", "order_id": "gid://shopify/Order/9"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("permission", response.get_json()["text"])
+        mark_paid.assert_not_called()
+
+    def test_a_bogus_context_action_is_ignored_and_falls_through_to_the_model(self):
+        with mock.patch.object(self.main, "run_agent") as run_agent:
+            async def fake_run(prompt, ctx_, state=None):
+                return "ok"
+            run_agent.side_effect = fake_run
+            response = self.message(context={"action": "delete_everything"})
+        self.assertEqual(response.status_code, 200)
+        run_agent.assert_called_once()
 
 
 if __name__ == "__main__":

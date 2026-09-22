@@ -115,6 +115,21 @@ def v1_message():
     if USE_ROLE not in [str(role) for role in (user.get("roles") or [])]:
         return jsonify(error="user is not allowed to use the orders assistant"), 403
 
+    # A handoff back from the invoicing agent, naming exactly which order to mark paid once its Xero
+    # invoice was actually sent. Deterministic, no model involved - the order id came from the
+    # invoicing agent's own structured context, not parsed from a sentence. See entry.mark_order_paid.
+    context = data.get("context") if isinstance(data.get("context"), dict) else {}
+    if context.get("action") == "mark_order_paid":
+        try:
+            result = entry.mark_order_paid(user, conversation, context.get("order_id"), request_id)
+        except entry.ActRefused as exc:
+            # A refusal is an answer, not an error, so the person sees why.
+            return jsonify(text=str(exc))
+        except AuthorizationUnavailable:
+            app.logger.exception("permissions unavailable")
+            return jsonify(error="permissions could not be checked, so the order was not marked paid"), 503
+        return jsonify(result)
+
     text = str(data.get("text", "")).strip()
     if not text:
         return jsonify(error="text is required"), 400
