@@ -82,7 +82,10 @@ are what the drafts already show.
   says "Marked paid: invoiced in Xero" and who approved.
 - **Create (unpaid):** the draft gets payment terms first (the company location's own terms, else "Due on
   fulfilment"), so Shopify creates it with payment outstanding. It is your back-order / waiting-to-invoice
-  state. The deprecated `paymentPending` argument is not used.
+  state. The deprecated `paymentPending` argument is not used. Net terms (for example "Net 30") need an
+  issue date to count the days from, which is sent as today's date. A fixed due-date terms template isn't
+  supported (there's no due date to send); the draft flags this so an unpaid attempt doesn't fail as a
+  surprise.
 
 ## Customer emails
 Customers are emailed by Shopify's usual order notifications when the order is **created**, not while it is a
@@ -100,8 +103,9 @@ clear message and nothing is created.
 ## Verify on the first real order
 A few behaviours can only be confirmed against the live store. Start with a small order for TWL's own
 company ("The Whisky List", which has Net 30 terms) and check:
-1. **Paid vs unpaid.** Paid shows as paid with no payment terms. Unpaid shows the payment terms and an
-   outstanding balance. If a company's default terms make a "paid" order look pending, tell me.
+1. **Paid vs unpaid.** Paid shows as paid. Unpaid shows an outstanding balance (the draft text doesn't name
+   the payment terms, but Shopify applies them). If a company's default terms make a "paid" order look
+   pending, tell me.
 2. **Discounts and totals.** The draft's numbers match what Shopify shows on the order.
 3. **An individual customer** (one who isn't a company). Confirm normal prices, and that payment terms can
    be put on their draft. If Shopify refuses terms for individuals, "unpaid" will fail with a clear message.

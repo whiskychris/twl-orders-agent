@@ -106,7 +106,7 @@ query Location($id: ID!) {
     }
     shippingAddress { address1 address2 city zoneCode zip countryCode recipient phone companyName }
     billingAddress { address1 address2 city zoneCode zip countryCode recipient phone companyName }
-    buyerExperienceConfiguration { paymentTermsTemplate { id name } }
+    buyerExperienceConfiguration { paymentTermsTemplate { id name paymentTermsType } }
   }
 }
 """
@@ -405,7 +405,10 @@ def get_location(location_id):
         "contact_id": contact,
         "shipping": _address(node.get("shippingAddress")),
         "billing": _address(node.get("billingAddress")) or _address(node.get("shippingAddress")),
-        "terms": {"id": template["id"], "name": template["name"]} if template else None,
+        "terms": (
+            {"id": template["id"], "name": template["name"], "type": template.get("paymentTermsType")}
+            if template else None
+        ),
     }
 
 
@@ -458,7 +461,7 @@ def default_unpaid_terms():
     for wanted in ("FULFILLMENT", "RECEIPT"):
         for template in templates:
             if template.get("paymentTermsType") == wanted:
-                return {"id": template["id"], "name": template["name"]}
+                return {"id": template["id"], "name": template["name"], "type": wanted}
     raise ShopifyError("Shopify has no 'due on fulfilment' or 'due on receipt' payment terms to use.")
 
 
