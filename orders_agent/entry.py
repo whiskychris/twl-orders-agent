@@ -425,10 +425,13 @@ def _result(order, invoicing, prefix=""):
     }
     if invoicing:
         # The invoicing agent takes it from here: it prepares and, after its own approval, sends the
-        # Xero invoice, then hands the thread back here (mark_order_paid) once that's done.
+        # Xero invoice, then hands the thread back here (mark_order_paid) once that's done. order_id
+        # goes in structured context, not just the text, so invoicing fetches the order by id rather
+        # than having to parse it back out of a sentence.
         response["handoff"] = {
             "agent_id": "invoicing",
             "text": f"Prepare a Xero invoice for Shopify order {name}.",
+            "context": {"action": "prepare_invoice", "order_id": order["id"], "order_name": name},
         }
     return response
 

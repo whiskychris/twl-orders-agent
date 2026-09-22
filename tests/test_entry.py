@@ -328,7 +328,10 @@ class ExecuteTests(unittest.TestCase):
         self.assertTrue(result["result"]["invoicing"])
         self.assertEqual(
             result["handoff"],
-            {"agent_id": "invoicing", "text": "Prepare a Xero invoice for Shopify order #1234."},
+            {
+                "agent_id": "invoicing", "text": "Prepare a Xero invoice for Shopify order #1234.",
+                "context": {"action": "prepare_invoice", "order_id": "gid://shopify/Order/9", "order_name": "#1234"},
+            },
         )
 
     def test_net_terms_send_an_issue_date(self):
