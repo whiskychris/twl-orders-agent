@@ -444,6 +444,38 @@ def build_server(ctx, state=None):
             prepare_order_edit,
         )
 
+        async def prepare_invoice_for_order(args):
+            audit_tool(ctx, "prepare_invoice_for_order", ORDER_ENTRY, allowed=True)
+            try:
+                result = await asyncio.to_thread(entry.prepare_invoice_handoff, ctx, args.get("order", ""))
+            except (entry.EntryError, shopify.ShopifyError) as exc:
+                log.warning("prepare_invoice_for_order refused for %s: %s", ctx.user_id, str(exc)[:500])
+                return _error(str(exc))
+            state.proposal = result["proposal"]
+            state.text = result["text"]
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Ready for approval, posted with a button. Do not repeat the figures. "
+                        "Say nothing more than one short line.",
+                    }
+                ]
+            }
+
+        add(
+            "prepare_invoice_for_order",
+            "Start invoicing an EXISTING order that hasn't been invoiced yet - for example one created "
+            "with 'Approve Order Only', or any order that's still unpaid. Nothing is sent here: "
+            "approving hands the thread to the invoicing agent, which prepares its own Xero invoice "
+            "preview for its own separate approval. Refuses if the order is already paid (meaning it's "
+            "already been invoiced through this system). Use get_order first if you want to check an "
+            "order's status before offering to invoice it. This is a different thing from prepare_order_edit - "
+            "invoicing sends the order to Xero, it never changes what's on the order.",
+            _schema({"order": {**STRING, "description": "Order number, with or without #."}}, required=["order"]),
+            prepare_invoice_for_order,
+        )
+
         add(
             "prepare_draft_order",
             "Price a draft order for an existing customer and put it up for approval. Nothing is created "

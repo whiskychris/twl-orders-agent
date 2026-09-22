@@ -142,6 +142,27 @@ is no separate remove tool, matching Shopify's own API shape.
 6. **Needs the `write_order_edits` scope**, separate from `write_orders` - found live: without it, every
    `orderEditBegin` call is refused. See `docs/shopify.md`.
 
+## Invoicing an existing, unpaid order
+For an order that was created with **Approve Order Only** (or has otherwise never been invoiced) and is
+still unpaid: `"orders: invoice order 1234"`, `"invoice this order"`. This is the piece that completes the
+two-step flow described above - Approve Order Only defers invoicing, and this is how it happens later,
+on demand, instead of only at creation time.
+
+The model has one tool, `prepare_invoice_for_order` (`entry.prepare_invoice_handoff`), which:
+1. Looks the order up and refuses if it's already `PAID` (meaning it's already been invoiced through
+   this system - nothing to do).
+2. Posts a single **Start Invoicing** button. Approving does not touch Xero itself: `execute()`
+   re-checks the order is still unpaid (never trusting what `prepare()` saw), then hands the thread to
+   `twl-invoicing-agent` with the same `prepare_invoice` handoff order creation's **Approve & Send
+   Invoice** choice uses (see `_result` above) - so from here it's the exact same flow, just started
+   later instead of at creation. The invoicing agent then runs its own, separate approval for the actual
+   Xero invoice, and hands the thread back here once it's sent, to mark the order paid.
+
+This is deliberately a thin wrapper: no new Xero logic, no new mapping rules - it just gets an
+already-built order into the exact same handoff the "new order" flow already uses. Reuses the
+`order_entry` capability and the existing `order_editing.find_order_for_edit` lookup (id, name, financial
+status - all this needs), so no new Shopify query was needed either.
+
 ## Customer emails
 Customers are emailed by Shopify's usual order notifications when the order is **created**, not while it is a
 draft. This agent doesn't send email and doesn't control that. Test orders should be for TWL's own account or
