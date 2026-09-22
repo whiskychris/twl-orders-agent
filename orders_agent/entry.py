@@ -23,6 +23,7 @@ Paid vs unpaid (a choice made when approving):
 """
 
 import re
+from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from .authorization import ORDER_ENTRY, AuthorizationError, audit, resolve_context
@@ -51,6 +52,7 @@ CHOICES = [
     {"id": "create_unpaid", "label": "Create order (not invoiced, unpaid)"},
 ]
 CHOICE_IDS = frozenset(choice["id"] for choice in CHOICES)
+TERMS_TYPES = frozenset({"RECEIPT", "NET", "FIXED", "FULFILLMENT", "UNKNOWN"})
 
 
 class EntryError(Exception):
@@ -156,7 +158,7 @@ def _expected_discount(line, unit_price):
     return (value * line["quantity"] if discount["type"] == "per_unit" else value).quantize(CENTS, rounding=ROUND_HALF_UP)
 
 
-def build_input(subject, lines, note, tags, terms_id=None):
+def build_input(subject, lines, note, tags, terms_id=None, terms_type=None):
     """The DraftOrderInput for Shopify. `subject` is a company location (priced with the company's own
     price list) or an individual customer (normal prices). Addresses go straight back to Shopify here
     and never reach the model."""
@@ -183,7 +185,11 @@ def build_input(subject, lines, note, tags, terms_id=None):
     if subject.get("billing"):
         draft["billingAddress"] = subject["billing"]
     if terms_id:
-        draft["paymentTerms"] = {"paymentTermsTemplateId": terms_id}
+        payment_terms = {"paymentTermsTemplateId": terms_id}
+        if terms_type == "NET":
+            # Net terms are due a number of days after issue, so Shopify needs an issue date to count from.
+            payment_terms["paymentSchedules"] = [{"issuedAt": datetime.now(timezone.utc).isoformat()}]
+        draft["paymentTerms"] = payment_terms
     return draft
 
 
@@ -292,7 +298,10 @@ def prepare(ctx, raw_target, raw_lines, note=None):
             else:
                 warnings.append(f"Line {number}: there may not be enough stock for {line['quantity']}.")
 
-    terms = subject["terms"] or shop.default_unpaid_terms()
+    # Unpaid orders always use TWL's own "Due on fulfilment" terms, regardless of what's configured for this
+    # customer in Shopify: that field isn't otherwise used, and this avoids terms types order entry can't
+    # support (a fixed due date has no date to send; net terms need an issue date, handled in build_input).
+    terms = shop.default_unpaid_terms()
     payload = {
         "version": 2,
         "target": target,
@@ -376,7 +385,13 @@ def _validate_payload(payload):
         terms_id = payload["terms"]["id"]
         if not re.match(r"^gid://shopify/PaymentTermsTemplate/\d+$", terms_id):
             raise ValueError("terms")
-        return target, lines, expected, terms_id, _one_line(payload.get("note"), MAX_NOTE), payload["requested_by"]
+        terms_type = payload["terms"].get("type")
+        if terms_type is not None and terms_type not in TERMS_TYPES:
+            raise ValueError("terms")
+        return (
+            target, lines, expected, terms_id, terms_type,
+            _one_line(payload.get("note"), MAX_NOTE), payload["requested_by"],
+        )
     except (KeyError, TypeError, ValueError, InvalidOperation, EntryError, AttributeError):
         raise ActRefused("That draft is malformed, so nothing was created. Ask me to draft it again.") from None
 
@@ -418,7 +433,7 @@ def execute(user, conversation, choice, proposal, request_id):
     if not TOKEN.match(token):
         raise ActRefused("That draft has no valid reference, so I did nothing.")
 
-    target, lines, expected, terms_id, note, requester = _validate_payload(proposal.get("payload") or {})
+    target, lines, expected, terms_id, terms_type, note, requester = _validate_payload(proposal.get("payload") or {})
     payload = proposal["payload"]
     customer_name = payload["display"]["name"]
     paid = choice == "create_paid"
@@ -449,7 +464,10 @@ def execute(user, conversation, choice, proposal, request_id):
                     "Nothing was created. Ask me to draft it again."
                 )
             draft = shop.create_draft(
-                build_input(subject, lines, order_note, ["smith-order-entry", tag], None if paid else terms_id)
+                build_input(
+                    subject, lines, order_note, ["smith-order-entry", tag],
+                    None if paid else terms_id, None if paid else terms_type,
+                )
             )
             draft_id = draft["id"]
 

@@ -16,7 +16,7 @@ COMPANY = "gid://shopify/Company/1"
 LOCATION = "gid://shopify/CompanyLocation/2"
 VARIANT_A = "gid://shopify/ProductVariant/10"
 VARIANT_B = "gid://shopify/ProductVariant/11"
-TERMS = {"id": "gid://shopify/PaymentTermsTemplate/9", "name": "Due on fulfillment"}
+TERMS = {"id": "gid://shopify/PaymentTermsTemplate/9", "name": "Due on fulfillment", "type": "FULFILLMENT"}
 
 ALL = ["orders", "products", "inventory", "customers", "order_entry"]
 USERS = {
@@ -250,10 +250,17 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(result["proposal"]["kind"], "draft_order")
         self.assertEqual(result["warnings"], [])
 
-    def test_the_location_terms_are_used_else_the_default(self):
-        net30 = {"id": "gid://shopify/PaymentTermsTemplate/4", "name": "Net 30"}
-        self.assertEqual(self.prepare(loc=location(terms=net30))["proposal"]["payload"]["terms"], net30)
-        self.assertEqual(self.prepare(loc=location(terms=None))["proposal"]["payload"]["terms"], TERMS)
+    def test_unpaid_terms_are_always_the_default_never_the_customers_own(self):
+        # The customer's own terms (Net 30, a fixed due date, or anything else) are never used: order entry
+        # always stamps unpaid drafts with TWL's own "Due on fulfilment", since Shopify's terms field isn't
+        # otherwise used and this sidesteps terms types order entry can't support (net needs an issue date,
+        # fixed needs a due date it doesn't have).
+        for terms in (
+            {"id": "gid://shopify/PaymentTermsTemplate/4", "name": "Net 30", "type": "NET"},
+            {"id": "gid://shopify/PaymentTermsTemplate/7", "name": "Due 30 June", "type": "FIXED"},
+            None,
+        ):
+            self.assertEqual(self.prepare(loc=location(terms=terms))["proposal"]["payload"]["terms"], TERMS, terms)
 
 
 class ExecuteTests(unittest.TestCase):
@@ -315,6 +322,21 @@ class ExecuteTests(unittest.TestCase):
         self.assertFalse(result["result"]["paid"])
         self.assertEqual(self.created[0]["paymentTerms"], {"paymentTermsTemplateId": TERMS["id"]})
 
+    def test_unpaid_with_net_terms_sends_an_issue_date(self):
+        # Net terms are due a number of days after issue, so Shopify needs an issue date to count from
+        # (without it: "An issue date is required with net payment terms").
+        self.proposal["payload"]["terms"] = {"id": "gid://shopify/PaymentTermsTemplate/4", "name": "Net 30", "type": "NET"}
+        self.run_execute("create_unpaid")
+        terms = self.created[0]["paymentTerms"]
+        self.assertEqual(terms["paymentTermsTemplateId"], "gid://shopify/PaymentTermsTemplate/4")
+        self.assertEqual(len(terms["paymentSchedules"]), 1)
+        self.assertIn("issuedAt", terms["paymentSchedules"][0])
+
+    def test_paid_with_net_terms_sends_no_payment_terms_at_all(self):
+        self.proposal["payload"]["terms"] = {"id": "gid://shopify/PaymentTermsTemplate/4", "name": "Net 30", "type": "NET"}
+        self.run_execute("create_paid")
+        self.assertNotIn("paymentTerms", self.created[0])
+
     def test_the_draft_is_tagged_and_carries_who_asked_and_who_approved(self):
         self.run_execute("create_paid")
         draft = self.created[0]
@@ -369,6 +391,7 @@ class ExecuteTests(unittest.TestCase):
             lambda p: p["lines"][0].update(quantity=0),
             lambda p: p["lines"][0].update(variant_id="gid://shopify/Product/1"),
             lambda p: p["terms"].update(id="gid://shopify/Something/1"),
+            lambda p: p["terms"].update(type="NONSENSE"),
             lambda p: p.pop("expected"),
             lambda p: p.update(version=1),
         ):

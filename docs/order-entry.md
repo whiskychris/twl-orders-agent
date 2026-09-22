@@ -80,9 +80,12 @@ are what the drafts already show.
 "Paid" means the order was invoiced through Xero. This agent never touches Xero. It records the choice:
 - **Create (paid):** the draft is completed normally, so Shopify records the order as paid. The order note
   says "Marked paid: invoiced in Xero" and who approved.
-- **Create (unpaid):** the draft gets payment terms first (the company location's own terms, else "Due on
-  fulfilment"), so Shopify creates it with payment outstanding. It is your back-order / waiting-to-invoice
-  state. The deprecated `paymentPending` argument is not used.
+- **Create (unpaid):** the draft gets TWL's own "Due on fulfilment" payment terms (never the customer's own
+  terms in Shopify, which this process doesn't otherwise use), so Shopify creates it with payment
+  outstanding. It is your back-order / waiting-to-invoice state. The deprecated `paymentPending` argument is
+  not used. Always using the same terms sidesteps two things a customer's own terms could otherwise need: a
+  net terms template (for example "Net 30") needs an issue date, and a fixed-due-date template has no due
+  date to send at all.
 
 ## Customer emails
 Customers are emailed by Shopify's usual order notifications when the order is **created**, not while it is a
@@ -99,9 +102,9 @@ clear message and nothing is created.
 
 ## Verify on the first real order
 A few behaviours can only be confirmed against the live store. Start with a small order for TWL's own
-company ("The Whisky List", which has Net 30 terms) and check:
-1. **Paid vs unpaid.** Paid shows as paid with no payment terms. Unpaid shows the payment terms and an
-   outstanding balance. If a company's default terms make a "paid" order look pending, tell me.
+company ("The Whisky List") and check:
+1. **Paid vs unpaid.** Paid shows as paid. Unpaid shows an outstanding balance on "Due on fulfilment" terms,
+   regardless of what terms that company has configured in Shopify. If a "paid" order looks pending, tell me.
 2. **Discounts and totals.** The draft's numbers match what Shopify shows on the order.
 3. **An individual customer** (one who isn't a company). Confirm normal prices, and that payment terms can
    be put on their draft. If Shopify refuses terms for individuals, "unpaid" will fail with a clear message.
