@@ -548,8 +548,11 @@ MONEY_NODE = lambda amount, currency="AUD": {"shopMoney": {"amount": amount, "cu
 
 def edit_order(**over):
     base = {
-        "id": ORDER_EDIT_ID, "name": "#1234", "financial_status": "PENDING",
-        "lines": [{"line_item_id": LINE_ITEM_A, "title": "Arran 10", "quantity": 6, "variant_id": VARIANT_A}],
+        "id": ORDER_EDIT_ID, "name": "#1234", "financial_status": "PENDING", "total": "521.40", "currency": "AUD",
+        "lines": [{
+            "line_item_id": LINE_ITEM_A, "title": "Arran 10", "quantity": 6, "variant_id": VARIANT_A,
+            "unit_price": "86.90", "line_total": "521.40",
+        }],
     }
     return {**base, **over}
 
@@ -693,6 +696,22 @@ class ExecuteOrderEditTests(unittest.TestCase):
         self.assertIn("https://admin.example/orders/9", result["text"])
         commit.assert_called_once_with("calc-1", notify_customer=False)
 
+    def test_a_successful_edit_always_re_offers_invoicing(self):
+        # A committed edit always leaves the order unpaid (paid orders are refused before anything is
+        # staged), so this loops back to the invoice decision every time, not just when the edit started
+        # from the Edit Order button - see main.py's prepare_invoice_confirmation dispatch.
+        result, _commit = self.run_execute()
+        self.assertEqual(
+            result["handoff"],
+            {
+                "agent_id": "orders", "text": "Show the invoicing options for order #1234.",
+                "context": {
+                    "action": "prepare_invoice_confirmation",
+                    "order_id": ORDER_EDIT_ID, "order_name": "#1234",
+                },
+            },
+        )
+
     def test_an_unknown_choice_is_refused(self):
         with mock.patch.object(entry.order_editing, "begin_edit") as begin:
             with self.assertRaises(entry.ActRefused):
@@ -751,14 +770,16 @@ class ExecuteOrderEditTests(unittest.TestCase):
 
 
 class PrepareInvoiceHandoffTests(unittest.TestCase):
-    def test_an_unpaid_order_gets_a_start_invoicing_proposal(self):
+    def test_an_unpaid_order_gets_a_priced_proposal_with_two_choices(self):
         with mock.patch.object(entry.order_editing, "find_order_for_edit", return_value=edit_order()):
             result = entry.prepare_invoice_handoff(ctx(), "#1234")
         proposal = result["proposal"]
         self.assertEqual(proposal["kind"], "invoice_handoff")
-        self.assertEqual([c["id"] for c in proposal["choices"]], ["approve_invoice"])
+        self.assertEqual([c["id"] for c in proposal["choices"]], ["approve_invoice", "edit_first"])
         self.assertEqual(proposal["payload"], {"version": 1, "order_id": ORDER_EDIT_ID, "order_name": "#1234"})
         self.assertIn("#1234", result["text"])
+        self.assertIn("Arran 10: 6 @ 86.90 → *521.40*", result["text"])
+        self.assertIn("Total 521.40 AUD", result["text"])
 
     def test_a_paid_order_refuses(self):
         with mock.patch.object(entry.order_editing, "find_order_for_edit", return_value=edit_order(financial_status="PAID")):
@@ -811,6 +832,14 @@ class ExecuteInvoiceHandoffTests(unittest.TestCase):
                 "context": {"action": "prepare_invoice", "order_id": ORDER_EDIT_ID, "order_name": "#1234"},
             },
         )
+
+    def test_edit_first_replies_without_touching_shopify_or_invoicing(self):
+        with mock.patch.object(entry.order_editing, "find_order_for_edit") as find_order:
+            result = entry.execute(self.APPROVER, self.CONVERSATION, "edit_first", self.proposal, "req1")
+        find_order.assert_not_called()
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("#1234", result["text"])
+        self.assertNotIn("handoff", result)
 
     def test_an_unknown_choice_is_refused(self):
         with mock.patch.object(entry.order_editing, "find_order_for_edit") as find_order:
@@ -1310,6 +1339,21 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("permission", response.get_json()["text"])
         mark_paid.assert_not_called()
+
+    def test_a_prepare_invoice_confirmation_handoff_bypasses_the_model_entirely(self):
+        # The self-handoff _execute_order_edit sends itself after a successful edit - see
+        # test_a_successful_edit_always_re_offers_invoicing. This is the receiving end.
+        with mock.patch.object(entry.order_editing, "find_order_for_edit", return_value=edit_order()), \
+             mock.patch.object(self.main, "run_agent") as run_agent:
+            response = self.message(
+                roles=("orders.use", "orders.approve"),
+                context={"action": "prepare_invoice_confirmation", "order_id": ORDER_EDIT_ID, "order_name": "#1234"},
+            )
+        body = response.get_json()
+        self.assertEqual(body["proposal"]["kind"], "invoice_handoff")
+        self.assertEqual([c["id"] for c in body["proposal"]["choices"]], ["approve_invoice", "edit_first"])
+        self.assertIn("#1234", body["text"])
+        run_agent.assert_not_called()
 
     def test_a_bogus_context_action_is_ignored_and_falls_through_to_the_model(self):
         with mock.patch.object(self.main, "run_agent") as run_agent:

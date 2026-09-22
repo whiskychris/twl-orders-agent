@@ -130,6 +130,24 @@ def v1_message():
             return jsonify(error="permissions could not be checked, so the order was not marked paid"), 503
         return jsonify(result)
 
+    # A self-handoff from _execute_order_edit, right after a successful edit: re-show the invoice
+    # decision (Send Invoice / Edit Order / Cancel), re-priced with whatever just changed. Deterministic,
+    # no model involved - the order name comes from the handoff's own structured context, not parsed
+    # from a sentence. Same shape as the mark_order_paid dispatch above.
+    if context.get("action") == "prepare_invoice_confirmation":
+        try:
+            ctx = resolve_context(user, conversation, request_id)
+        except AuthorizationError as exc:
+            return jsonify(text=str(exc))
+        except AuthorizationUnavailable:
+            app.logger.exception("permissions unavailable")
+            return jsonify(error="permissions could not be checked, so nothing was looked up"), 503
+        try:
+            result = entry.prepare_invoice_handoff(ctx, context.get("order_name") or context.get("order_id"))
+        except entry.EntryError as exc:
+            return jsonify(text=str(exc))
+        return jsonify(text=result["text"], proposal=result["proposal"])
+
     text = str(data.get("text", "")).strip()
     if not text:
         return jsonify(error="text is required"), 400

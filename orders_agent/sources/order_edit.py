@@ -27,8 +27,13 @@ query OrderForEdit($query: String!) {
       id
       name
       displayFinancialStatus
+      currentTotalPriceSet { shopMoney { amount currencyCode } }
       lineItems(first: 50) {
-        nodes { id title quantity variant { id } }
+        nodes {
+          id title quantity variant { id }
+          discountedUnitPriceSet { shopMoney { amount } }
+          discountedTotalSet { shopMoney { amount } }
+        }
       }
     }
   }
@@ -108,9 +113,11 @@ def _user_errors(payload, what):
 
 
 def find_order_for_edit(order_number):
-    """The order to edit, by its Shopify order number (for example 1234 or #1234). Only what editing
-    needs: id, name, financial status, and the current lines with their variant ids, so a requested
-    change can be matched to an existing line instead of adding a duplicate."""
+    """The order to edit (or invoice), by its Shopify order number (for example 1234 or #1234). id,
+    name, financial status, the current lines with their variant ids (so a requested change can be
+    matched to an existing line instead of adding a duplicate), and pricing (each line's current unit
+    price and total, and the order's own total) - not needed for staging an edit itself, but reused by
+    the invoice-confirmation preview (entry.prepare_invoice_handoff) so it doesn't need a second query."""
     number = str(order_number or "").strip().lstrip("#")
     if not number.isdigit():
         raise ShopifyError("Use a plain order number (for example 1234 or #1234).")
@@ -119,14 +126,19 @@ def find_order_for_edit(order_number):
     if not nodes:
         raise ShopifyError(f"I couldn't find order #{number}.")
     order = nodes[0]
+    total_money = (order.get("currentTotalPriceSet") or {}).get("shopMoney") or {}
     return {
         "id": order["id"],
         "name": order["name"],
         "financial_status": order.get("displayFinancialStatus"),
+        "total": total_money.get("amount"),
+        "currency": total_money.get("currencyCode"),
         "lines": [
             {
                 "line_item_id": node["id"], "title": node["title"], "quantity": node["quantity"],
                 "variant_id": (node.get("variant") or {}).get("id"),
+                "unit_price": (node.get("discountedUnitPriceSet") or {}).get("shopMoney", {}).get("amount"),
+                "line_total": (node.get("discountedTotalSet") or {}).get("shopMoney", {}).get("amount"),
             }
             for node in _nodes(order.get("lineItems"))
         ],
