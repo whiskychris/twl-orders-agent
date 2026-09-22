@@ -100,9 +100,14 @@ the order to mark paid in structured data (never free text a model would have to
 `mark_order_paid` in `orders_agent/entry.py`. This agent never touches Xero itself; it only creates the
 Shopify order and, on that handoff back, marks it paid.
 
-**Not deployed yet:** `twl-invoicing-agent` doesn't exist as a live service yet. Until it does, Approve &
-Send Invoice will create the order but the handoff will fail quietly (the gateway falls back to the plain
-"order created" message) - use Approve Order Only until invoicing agent is live.
+**`orderMarkAsPaid` currently fails on a Shopify permission, not a bug.** Found live: this mutation needs
+`write_orders` (already in `shopify.app.toml`) **and** a separate Shopify staff permission,
+`mark_orders_as_paid`, which isn't the store owner's own permission and isn't self-serve from Settings >
+Users and permissions - check Settings > Apps and sales channels > Develop apps > TWL Orders Agent for an
+additional permission request there, or otherwise treat it as a Shopify support question. Until it's
+granted, `mark_order_paid` refuses with a friendly message naming the order and linking straight to it in
+the Shopify admin, rather than relaying Shopify's raw API error - the invoice has already been sent by
+this point either way, so it's a manual "mark it paid yourself" step, not a lost order.
 
 ## Customer emails
 Customers are emailed by Shopify's usual order notifications when the order is **created**, not while it is a

@@ -465,12 +465,14 @@ class MarkOrderPaidTests(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def run_mark(self, order_id=None, user=None, conversation=None):
+    def run_mark(self, order_id=None, order_name="#1234", user=None, conversation=None):
         with mock.patch.object(
             entry.shop, "mark_paid",
             return_value={"id": order_id or self.ORDER_ID, "name": "#1234", "legacyResourceId": "9", "displayFinancialStatus": "PAID"},
         ) as mark_paid:
-            result = entry.mark_order_paid(user or self.APPROVER, conversation or self.CONVERSATION, order_id or self.ORDER_ID, "req1")
+            result = entry.mark_order_paid(
+                user or self.APPROVER, conversation or self.CONVERSATION, order_id or self.ORDER_ID, order_name, "req1",
+            )
         return result, mark_paid
 
     def test_marks_the_order_paid(self):
@@ -483,37 +485,44 @@ class MarkOrderPaidTests(unittest.TestCase):
         user = {**self.APPROVER, "roles": ["orders.use"]}
         with mock.patch.object(entry.shop, "mark_paid") as mark_paid:
             with self.assertRaises(entry.ActRefused):
-                entry.mark_order_paid(user, self.CONVERSATION, self.ORDER_ID, "req1")
+                entry.mark_order_paid(user, self.CONVERSATION, self.ORDER_ID, "#1234", "req1")
         mark_paid.assert_not_called()
 
     def test_no_order_entry_capability_refuses(self):
         user = {**self.APPROVER, "user_id": "twl:reader"}
         with mock.patch.object(entry.shop, "mark_paid") as mark_paid:
             with self.assertRaises(entry.ActRefused):
-                entry.mark_order_paid(user, self.CONVERSATION, self.ORDER_ID, "req1")
+                entry.mark_order_paid(user, self.CONVERSATION, self.ORDER_ID, "#1234", "req1")
         mark_paid.assert_not_called()
 
     def test_a_malformed_order_id_is_refused_before_calling_shopify(self):
         for bad in (None, "", "1234", "#1234", "gid://shopify/DraftOrder/9", "gid://shopify/Order/abc"):
             with mock.patch.object(entry.shop, "mark_paid") as mark_paid:
                 with self.assertRaises(entry.ActRefused, msg=str(bad)):
-                    entry.mark_order_paid(self.APPROVER, self.CONVERSATION, bad, "req1")
+                    entry.mark_order_paid(self.APPROVER, self.CONVERSATION, bad, "#1234", "req1")
             mark_paid.assert_not_called()
 
-    def test_shopify_refusing_is_a_clean_refusal(self):
+    def test_shopify_refusing_points_at_marking_it_paid_by_hand(self):
+        # Found live: orderMarkAsPaid needs a Shopify staff permission this app doesn't have yet.
+        # The raw API error isn't actionable on its own, so this should name the order and link
+        # straight to it in the Shopify admin, not just relay the API's error text.
         with mock.patch.object(
             entry.shop, "mark_paid",
-            side_effect=ShopifyError("Shopify would not mark the order paid: already paid"),
-        ):
-            with self.assertRaises(entry.ActRefused):
-                entry.mark_order_paid(self.APPROVER, self.CONVERSATION, self.ORDER_ID, "req1")
+            side_effect=ShopifyError("Access denied for orderMarkAsPaid field. Required access: write_orders access scope."),
+        ), mock.patch.object(entry, "admin_order_url", return_value="https://admin.example/orders/9"):
+            with self.assertRaises(entry.ActRefused) as caught:
+                entry.mark_order_paid(self.APPROVER, self.CONVERSATION, self.ORDER_ID, "#1234", "req1")
+        message = str(caught.exception)
+        self.assertIn("#1234", message)
+        self.assertIn("https://admin.example/orders/9", message)
+        self.assertIn("Access denied", message)
 
     def test_an_unlisted_channel_refuses(self):
         with mock.patch.object(entry.shop, "mark_paid") as mark_paid:
             with self.assertRaises(entry.ActRefused):
                 entry.mark_order_paid(
                     self.APPROVER, {"id": "slack:C0RANDOM:1.1", "source": "slack", "visibility": "channel"},
-                    self.ORDER_ID, "req1",
+                    self.ORDER_ID, "#1234", "req1",
                 )
         mark_paid.assert_not_called()
 
@@ -957,7 +966,7 @@ class EndpointTests(unittest.TestCase):
             response = self.message(
                 text="Mark order #1234 as paid.",
                 roles=("orders.use", "orders.approve"),
-                context={"action": "mark_order_paid", "order_id": "gid://shopify/Order/9"},
+                context={"action": "mark_order_paid", "order_id": "gid://shopify/Order/9", "order_name": "#1234"},
             )
         body = response.get_json()
         self.assertIn("#1234", body["text"])

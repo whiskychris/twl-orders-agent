@@ -499,7 +499,7 @@ def execute(user, conversation, choice, proposal, request_id):
 ORDER_ID = re.compile(r"^gid://shopify/Order/\d+$")
 
 
-def mark_order_paid(user, conversation, order_id, request_id):
+def mark_order_paid(user, conversation, order_id, order_name, request_id):
     """Mark an existing Shopify order paid. The only caller is the gateway's handoff relay, right
     after the invoicing agent has actually created and sent the Xero invoice for this order - never
     the model, and never from free text: `order_id` comes from the handoff's structured `context`,
@@ -516,11 +516,20 @@ def mark_order_paid(user, conversation, order_id, request_id):
         raise ActRefused("Marking orders paid isn't available in this conversation.")
     if not ORDER_ID.match(str(order_id or "")):
         raise ActRefused("That doesn't look like a Shopify order id, so I did nothing.")
+    name = str(order_name or "").strip() or "the order"
 
     try:
         order = shop.mark_paid(order_id)
     except ShopifyError as exc:
-        raise ActRefused(str(exc)) from None
+        # Found live: orderMarkAsPaid needs a Shopify staff permission (mark_orders_as_paid) that
+        # isn't the same thing as write_orders or the store owner's own permissions, and isn't
+        # self-serve from Users and permissions - Shopify support territory, not a code fix. A raw
+        # API error here isn't actionable, so point at doing it by hand instead of just relaying it.
+        url = admin_order_url(order_id.rsplit("/", 1)[-1])
+        raise ActRefused(
+            f"The invoice is sent, but I can't mark order {name} paid automatically yet ({exc}). Mark it "
+            f"paid yourself so it can be dispatched: <{url}|Open {name} in Shopify>."
+        ) from None
 
     audit("order_entry", request_id, ctx.user_id, ctx.source, ctx.visibility, action="marked_paid", order=order["name"])
     return {"text": f"Order *{order['name']}* is marked paid and ready to dispatch."}
