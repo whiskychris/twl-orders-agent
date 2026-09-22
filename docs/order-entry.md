@@ -139,6 +139,8 @@ is no separate remove tool, matching Shopify's own API shape.
    change. Shopify's own order-created and payment notifications still apply as usual.
 5. **Discounts are out of scope for v1.** This only changes quantities and adds plain lines at Shopify's normal
    price for that line. Up to 30 line changes per request.
+6. **Needs the `write_order_edits` scope**, separate from `write_orders` - found live: without it, every
+   `orderEditBegin` call is refused. See `docs/shopify.md`.
 
 ## Customer emails
 Customers are emailed by Shopify's usual order notifications when the order is **created**, not while it is a
