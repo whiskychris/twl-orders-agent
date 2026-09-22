@@ -840,6 +840,12 @@ def _execute_invoice_handoff(ctx, choice, proposal, request_id):
     if choice == "edit_first":
         return {
             "status": "ok",
+            # Nothing was written - this is a pure conversational nudge. no_op tells the gateway not to
+            # count this as "applied", so has_finished_proposal doesn't lock out the untagged follow-up
+            # reply that's about to describe the change, in a passive-reply channel - found live, the
+            # follow-up got no response at all before this was added. See twl-gateway's
+            # docs/smith-contract.md, "No-op actions".
+            "no_op": True,
             "text": (
                 f"No problem — tell me what to change on {order_name} (for example 'change Arran 10 to "
                 "12' or 'add 3 x GlenAllachie 12'). I'll show the invoicing options again once that's "
