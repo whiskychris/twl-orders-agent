@@ -840,6 +840,9 @@ class ExecuteInvoiceHandoffTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertIn("#1234", result["text"])
         self.assertNotIn("handoff", result)
+        # Tells the gateway this wrote nothing, so a passive-reply channel doesn't lock out the
+        # untagged follow-up that's about to describe the change - found live without this.
+        self.assertTrue(result["no_op"])
 
     def test_an_unknown_choice_is_refused(self):
         with mock.patch.object(entry.order_editing, "find_order_for_edit") as find_order:

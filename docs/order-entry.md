@@ -169,6 +169,13 @@ The model has one tool, `prepare_invoice_for_order` (`entry.prepare_invoice_hand
      end by re-offering to invoice it, since a successful edit only ever leaves an order unpaid (paid
      orders are refused before anything is staged) - not only edits that started from this screen.
 
+     **Edit Order's own reply sets `no_op: true`** (a `twl-gateway` field - see its
+     `docs/smith-contract.md`, "No-op actions"), because pressing it writes nothing. Found live: without
+     it, the gateway closed the proposal as "applied" like any real write, which made a passive-reply
+     channel (for example #sales) stop answering the very next, untagged message ("add 3 x GlenAllachie
+     12") with no error at all - it just went silent, because `has_finished_proposal` treats "applied"
+     as the thread having concluded. `no_op` tells the gateway this one didn't.
+
 This is deliberately a thin wrapper: no new Xero logic, no new mapping rules - it just gets an
 already-built order into the exact same handoff the "new order" flow already uses. Reuses the
 `order_entry` capability and the existing `order_editing.find_order_for_edit` lookup, extended with each
