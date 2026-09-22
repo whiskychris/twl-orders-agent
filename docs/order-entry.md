@@ -86,13 +86,14 @@ are what the drafts already show.
 
 ## Customer emails
 Customers are emailed by Shopify's usual order notifications when the order is **created**, not while it is a
-draft. This agent doesn't send email and doesn't control that: the draft says so, so approvers know that
-pressing Create can email the customer. Test orders should be for TWL's own account or a customer whose email
-is yours.
+draft. This agent doesn't send email and doesn't control that. Test orders should be for TWL's own account or
+a customer whose email is yours.
 
 ## Shopify setup
 The app needs these extra scopes (already listed in `shopify.app.toml`): `read_companies`,
-`read_draft_orders`, `write_draft_orders` and `read_publications` (product picking reads catalog membership). Update the app's scopes with the Shopify CLI
+`read_draft_orders`, `write_draft_orders`, `read_publications` (product picking reads catalog membership) and
+`write_payment_terms` (needed to create an unpaid draft with payment terms; without it Shopify refuses with
+"The user must have access to set payment terms"). Update the app's scopes with the Shopify CLI
 (`shopify app deploy`) and approve the new access in the store admin. Until then the tools fail with a
 clear message and nothing is created.
 

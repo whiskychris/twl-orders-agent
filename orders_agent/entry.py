@@ -262,6 +262,7 @@ def prepare(ctx, raw_target, raw_lines, note=None):
 
     variants = shop.get_variants([line["variant_id"] for line in lines])
     warnings = []
+    tags = {}  # line number -> "Back Order" or "Pre-order" (with ETA), shown on the line itself
     stock_notes = False
     if subject.get("contact_of"):
         # A company contact ordered as an individual. It is allowed when asked for (typing their email and
@@ -279,20 +280,20 @@ def prepare(ctx, raw_target, raw_lines, note=None):
         if not info or info["status"] != "ACTIVE":
             raise EntryError(f"Line {number}: {got['title']} isn't an active product, so it can't be ordered.")
         stock = info.get("stock")
-        # Anyone approving must see that a line is out of stock or a pre-order. Only people with the
-        # inventory capability see the actual count.
-        if stock is not None and stock <= 0:
-            warnings.append(f"Line {number}: {got['title']} is out of stock.")
+        # A pre-order or an out-of-stock line is tagged on the row itself, not as a separate warning, so
+        # it can't be missed. Only people with the inventory capability see an actual low-stock count.
+        if info.get("pre_order"):
+            eta = f" (ETA {format_eta(info['eta'])})" if info.get("eta") else " (no ETA set)"
+            tags[number] = "Pre-order" + eta
+            stock_notes = True
+        elif stock is not None and stock <= 0:
+            tags[number] = "Back Order"
             stock_notes = True
         elif stock is not None and stock < line["quantity"]:
             if ctx.has("inventory"):
                 warnings.append(f"Line {number}: only {stock} in stock for {line['quantity']} ordered.")
             else:
                 warnings.append(f"Line {number}: there may not be enough stock for {line['quantity']}.")
-            stock_notes = True
-        if info.get("pre_order"):
-            eta = f", ETA {format_eta(info['eta'])}" if info.get("eta") else ", no ETA set"
-            warnings.append(f"Line {number}: {got['title']} is a pre-order product{eta}.")
             stock_notes = True
 
     terms = subject["terms"] or shop.default_unpaid_terms()
@@ -301,7 +302,8 @@ def prepare(ctx, raw_target, raw_lines, note=None):
         "target": target,
         "display": _display(subject),
         "lines": [
-            {**line, "title": got["title"], "sku": got["sku"]} for line, got in zip(lines, calc["lines"])
+            {**line, "title": got["title"], "sku": got["sku"], "tag": tags.get(number)}
+            for number, (line, got) in enumerate(zip(lines, calc["lines"]), 1)
         ],
         "note": user_note,
         "requested_by": {"user_id": ctx.user_id, "name": ctx.name},
@@ -332,9 +334,9 @@ def render(payload, calc, warnings, tip=None):
     head = f"*Draft order for {company}*" + (f" ({place})" if place and place != company else "")
     rows = []
     for number, (line, got) in enumerate(zip(payload["lines"], calc["lines"]), 1):
-        name = got["title"] + (f" ({got['sku']})" if got["sku"] else "")
+        tag = f"*[{line['tag']}]* " if line.get("tag") else ""
         gross = got["unit_price"] * line["quantity"]
-        row = f"{number}. {line['quantity']} × {name} @ {fmt(got['unit_price'])} = {fmt(gross)}"
+        row = f"{number}. {tag}{line['quantity']} × {got['title']} @ {fmt(got['unit_price'])} = {fmt(gross)}"
         if got["discount_amount"]:
             row += f", less {fmt(got['discount_amount'])}"
         rows.append(row + f" → *{fmt(got['line_total'])}*")
@@ -342,16 +344,12 @@ def render(payload, calc, warnings, tip=None):
     parts = [
         head,
         "\n".join(rows),
-        f"Subtotal {fmt(calc['subtotal'])} · GST {fmt(calc['tax'])} · *Total {fmt(calc['total'])} {currency}*".strip(),
-        f"Priced by Shopify for this customer. If created unpaid, payment terms are *{payload['terms']['name']}*. "
-        "No shipping charge is added. Shopify sends its usual order emails to the customer once the order is "
-        "created (not while this is a draft).",
+        f"*Total {fmt(calc['total'])} {currency}*".strip(),
     ]
     if warnings:
         parts.append("⚠️ " + " ".join(warnings))
     if tip:
         parts.append(tip)
-    parts.append(f"Requested by {payload['requested_by']['name']}.")
     return "\n\n".join(parts)
 
 

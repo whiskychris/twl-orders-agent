@@ -166,8 +166,6 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(proposal["payload"]["requested_by"]["user_id"], "twl:jimmy-shore")
         self.assertIn("Nicks Wine Merchants", result["text"])
         self.assertIn("110.00 AUD", result["text"])
-        self.assertIn("Due on fulfillment", result["text"])
-        self.assertIn("Requested by Jimmy Shore", result["text"])
 
     def test_the_draft_is_priced_for_the_company_and_carries_no_email(self):
         self.prepare()
@@ -218,26 +216,31 @@ class PrepareTests(unittest.TestCase):
         self.assertNotIn("only 2", result["text"])
         self.assertNotIn(" 2 ", result["text"].split("⚠️")[1].split("\n")[0])
 
-    def test_an_out_of_stock_line_is_flagged_for_everyone_and_suggests_unpaid(self):
+    def test_an_out_of_stock_line_is_tagged_on_the_row_for_everyone_and_suggests_unpaid(self):
         for capabilities in (("orders", "order_entry"), ("orders", "order_entry", "inventory")):
             result = self.prepare(capabilities, variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": 0}})
-            self.assertIn("Product 1 is out of stock.", result["text"], capabilities)
+            self.assertIn("[Back Order]", result["text"], capabilities)
             self.assertIn("usually created as unpaid", result["text"])
-            self.assertIn("Line 1", result["warnings"][0])
+            self.assertEqual(result["warnings"], [])   # it's on the row, not a separate warning
 
     def test_an_oversold_line_counts_as_out_of_stock(self):
         result = self.prepare(variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": -19}})
-        self.assertIn("is out of stock", result["text"])
+        self.assertIn("[Back Order]", result["text"])
         self.assertNotIn("-19", result["text"])
 
     def test_a_pre_order_line_shows_its_eta(self):
         result = self.prepare(variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": 82, "pre_order": True, "eta": "2026-10-16"}})
-        self.assertIn("is a pre-order product, ETA 16 Oct 2026.", result["text"])
+        self.assertIn("[Pre-order (ETA 16 Oct 2026)]", result["text"])
         self.assertIn("usually created as unpaid", result["text"])
 
     def test_a_pre_order_with_no_eta_says_so(self):
         result = self.prepare(variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": 82, "pre_order": True, "eta": None}})
-        self.assertIn("pre-order product, no ETA set.", result["text"])
+        self.assertIn("[Pre-order (no ETA set)]", result["text"])
+
+    def test_a_pre_order_out_of_stock_is_tagged_pre_order_not_back_order(self):
+        result = self.prepare(variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": 0, "pre_order": True, "eta": None}})
+        self.assertIn("[Pre-order (no ETA set)]", result["text"])
+        self.assertNotIn("Back Order", result["text"])
 
     def test_plenty_of_stock_and_no_pre_order_means_no_warning_and_no_tip(self):
         result = self.prepare(variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": 500}})
@@ -248,7 +251,7 @@ class PrepareTests(unittest.TestCase):
     def test_flags_never_block_the_draft(self):
         result = self.prepare(variants={VARIANT_A: {"status": "ACTIVE", "sku": "S", "name": "n", "stock": 0, "pre_order": True, "eta": "2026-10-16"}})
         self.assertEqual(result["proposal"]["kind"], "draft_order")
-        self.assertEqual(len(result["warnings"]), 2)
+        self.assertEqual(result["warnings"], [])
 
     def test_the_location_terms_are_used_else_the_default(self):
         net30 = {"id": "gid://shopify/PaymentTermsTemplate/4", "name": "Net 30"}
@@ -444,7 +447,6 @@ class IndividualCustomerTests(unittest.TestCase):
         self.assertEqual(payload["display"], {"name": "Pat Example", "place": None})
         self.assertEqual(payload["terms"], TERMS)      # no company terms, so the default
         self.assertIn("Draft order for Pat Example", result["text"])
-        self.assertIn("usual order emails", result["text"])
 
     def test_the_customers_address_is_used_but_never_shown(self):
         result = self.prepare()
