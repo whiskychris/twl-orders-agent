@@ -509,13 +509,18 @@ class SearchTests(unittest.TestCase):
         self.addCleanup(search.clear_cache)
         good = {
             "collections": {"nodes": [{"id": "c1", "title": "Our Brands"}, {"id": "c2", "title": "TWL Independent Bottlers"}, {"id": "c3", "title": "Special Releases"}]},
-            "catalogs": {"nodes": [{"title": "Trade Core", "publication": {"id": "p1"}}, {"title": "Trade IBs", "publication": {"id": "p2"}}, {"title": "Trade Special Releases", "publication": {"id": "p3"}}]},
+            "catalogs": {"nodes": [
+                {"title": "Trade Core", "publication": {"id": "p1"}, "priceList": {"id": "pl1"}},
+                {"title": "Trade IBs", "publication": {"id": "p2"}, "priceList": {"id": "pl2"}},
+                {"title": "Trade Special Releases", "publication": {"id": "p3"}, "priceList": {"id": "pl3"}},
+            ]},
         }
         with mock.patch.object(search, "graphql", return_value=good) as graphql:
             first = search.resolve_sources(CONFIG)
             search.resolve_sources(CONFIG)
         self.assertEqual(graphql.call_count, 1)   # cached
         self.assertEqual((first["ourBrands"], first["tradeCore"], first["tradeSpecial"]), ("c1", "p1", "p3"))
+        self.assertEqual((first["tradeCorePriceList"], first["tradeIbsPriceList"], first["tradeSpecialPriceList"]), ("pl1", "pl2", "pl3"))
 
         search.clear_cache()
         for broken in (
@@ -528,6 +533,71 @@ class SearchTests(unittest.TestCase):
                     search.resolve_sources(CONFIG)
             self.assertIn("Nothing was guessed", str(caught.exception))
             search.clear_cache()
+
+    def test_a_catalog_with_no_price_list_still_resolves_for_ranking(self):
+        # Price lists never gate the core ranking pipeline - only trade_catalog_price cares about
+        # them, and only when pricing is actually asked for.
+        search.clear_cache()
+        self.addCleanup(search.clear_cache)
+        no_price_lists = {
+            "collections": {"nodes": [{"id": "c1", "title": "Our Brands"}, {"id": "c2", "title": "TWL Independent Bottlers"}, {"id": "c3", "title": "Special Releases"}]},
+            "catalogs": {"nodes": [{"title": "Trade Core", "publication": {"id": "p1"}}, {"title": "Trade IBs", "publication": {"id": "p2"}}, {"title": "Trade Special Releases", "publication": {"id": "p3"}}]},
+        }
+        with mock.patch.object(search, "graphql", return_value=no_price_lists):
+            value = search.resolve_sources(CONFIG)
+        self.assertEqual(value["tradeCore"], "p1")
+        self.assertIsNone(value["tradeCorePriceList"])
+
+
+class TradeCatalogPriceTests(unittest.TestCase):
+    """LUC's own source: the trade price for a variant, checked Trade Core, then Trade IBs, then
+    Special Releases - the same precedence order the ranking already uses ("best range wins")."""
+
+    PRICE_LISTS = {"tradeCorePriceList": "pl-core", "tradeIbsPriceList": "pl-ib", "tradeSpecialPriceList": "pl-special"}
+
+    def setUp(self):
+        search.clear_cache()
+        self.addCleanup(search.clear_cache)
+        patcher = mock.patch.object(search, "resolve_sources", return_value={**self.PRICE_LISTS, "tradeCore": "p1", "tradeIbs": "p2", "tradeSpecial": "p3"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def prices(self, amount):
+        return {"priceList": {"prices": {"nodes": [{"price": {"amount": amount, "currencyCode": "AUD"}}]}}}
+
+    def empty(self):
+        return {"priceList": {"prices": {"nodes": []}}}
+
+    def test_trade_core_wins_when_all_three_have_a_price(self):
+        # The live case: Arran 10 is priced on all three, but they don't agree (Trade Core $86.90,
+        # the others $87.20) - Trade Core must win, not whichever is queried first by luck.
+        responses = {"pl-core": self.prices("86.90"), "pl-ib": self.prices("87.20"), "pl-special": self.prices("87.20")}
+        with mock.patch.object(search, "graphql", side_effect=lambda q, v: responses[v["id"]]):
+            amount, name = search.trade_catalog_price(CONFIG, "40110264746058")
+        self.assertEqual((amount, name), ("86.90", "Trade Core"))
+
+    def test_falls_back_to_trade_ibs_when_trade_core_has_no_price(self):
+        responses = {"pl-core": self.empty(), "pl-ib": self.prices("87.20"), "pl-special": self.prices("87.20")}
+        with mock.patch.object(search, "graphql", side_effect=lambda q, v: responses[v["id"]]):
+            amount, name = search.trade_catalog_price(CONFIG, "40110264746058")
+        self.assertEqual((amount, name), ("87.20", "Trade IBs"))
+
+    def test_falls_back_to_special_releases_last(self):
+        responses = {"pl-core": self.empty(), "pl-ib": self.empty(), "pl-special": self.prices("90.00")}
+        with mock.patch.object(search, "graphql", side_effect=lambda q, v: responses[v["id"]]):
+            amount, name = search.trade_catalog_price(CONFIG, "40110264746058")
+        self.assertEqual((amount, name), ("90.00", "Trade Special Releases"))
+
+    def test_none_of_the_three_price_it_is_a_clean_none(self):
+        with mock.patch.object(search, "graphql", return_value=self.empty()):
+            amount, name = search.trade_catalog_price(CONFIG, "40110264746058")
+        self.assertEqual((amount, name), (None, None))
+
+    def test_a_missing_price_list_id_refuses_rather_than_skip_silently(self):
+        with mock.patch.object(search, "resolve_sources", return_value={**self.PRICE_LISTS, "tradeCorePriceList": None}):
+            with self.assertRaises(ShopifyError) as caught:
+                search.trade_catalog_price(CONFIG, "40110264746058")
+        self.assertIn("Nothing was guessed", str(caught.exception))
 
 
 class FindForOrderTests(unittest.TestCase):

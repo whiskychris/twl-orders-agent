@@ -388,6 +388,26 @@ def build_server(ctx, state=None):
             product_link,
         )
 
+        async def check_price(args):
+            return await call("check_price", ORDER_ENTRY, entry.check_price, args.get("query", ""))
+
+        add(
+            "check_price",
+            "Look up the RRP and LUC for a product - checking prices, not raising an order. RRP is the "
+            "price on The Whisky List's own variant. LUC is the trade catalog price with GST excluded "
+            "(divided by 1.1); a product not on any trade catalog has no LUC. These are selling prices, "
+            "never a cost or a margin. Returns a `decision`: 'use' means one product matched, with `rrp` "
+            "and `luc` (and `trade_catalog`, when there's more than one candidate, naming which one the "
+            "LUC came from); 'ask' means several products matched - list the numbered options and ask "
+            "which, never pick yourself; 'none' means nothing matched, or the product has more than one "
+            "variant and none of them is TWL's own.",
+            _schema(
+                {"query": {**STRING, "description": "The product as the user named it, for example 'Arran 10'."}},
+                required=["query"],
+            ),
+            check_price,
+        )
+
         async def prepare_draft_order(args):
             audit_tool(ctx, "prepare_draft_order", ORDER_ENTRY, allowed=True)
             try:

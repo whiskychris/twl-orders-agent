@@ -1192,7 +1192,7 @@ class EmailLookupTests(unittest.TestCase):
 
 
 def link_variant(**over):
-    base = {"id": "gid://shopify/ProductVariant/1", "title": "The Whisky List Shop", "sku": "", "stock": 10, "legacy_id": "111"}
+    base = {"id": "gid://shopify/ProductVariant/1", "title": "The Whisky List Shop", "sku": "", "stock": 10, "legacy_id": "111", "price": "109.00"}
     return {**base, **over}
 
 
@@ -1276,6 +1276,72 @@ class FindProductLinkTests(unittest.TestCase):
         self.assertNotIn("url", result)
 
 
+class CheckPriceTests(unittest.TestCase):
+    """check_price's own job: picking the TWL variant for its RRP, and combining it with
+    trade_catalog_price for the LUC. Product resolution itself is find_for_order's job (tested in
+    test_product_pick.py); trade_catalog_price's own precedence is tested in test_product_pick.py too."""
+
+    def use(self, product=None):
+        return {"decision": "use", "product": product or link_product(), "choice": {}, "unavailable": []}
+
+    def test_a_shopify_failure_becomes_a_clean_refusal(self):
+        with mock.patch.object(entry, "find_for_order", side_effect=ShopifyError("down")):
+            with self.assertRaises(ShopifyError):
+                entry.check_price("Arran 10")
+
+    def test_no_match_is_passed_through_unchanged(self):
+        decision = {"decision": "none", "unavailable": []}
+        with mock.patch.object(entry, "find_for_order", return_value=decision):
+            result = entry.check_price("Nonexistent Whisky")
+        self.assertEqual(result, decision)
+
+    def test_several_matches_are_passed_through_unchanged(self):
+        decision = {"decision": "ask", "options": [{"number": 1, "name": "x"}], "more_matches": 0, "unavailable": []}
+        with mock.patch.object(entry, "find_for_order", return_value=decision):
+            result = entry.check_price("Arran")
+        self.assertEqual(result, decision)
+
+    def test_ambiguous_variant_is_a_none_decision_with_a_note(self):
+        variants = [link_variant(id="gid://shopify/ProductVariant/2", title="Trade"), link_variant(title="Retail")]
+        with mock.patch.object(entry, "find_for_order", return_value=self.use(link_product(variants=variants))):
+            result = entry.check_price("Arran 10")
+        self.assertEqual(result["decision"], "none")
+        self.assertIn("Trade", result["note"])
+
+    def test_rrp_and_luc_for_the_reported_live_case(self):
+        # Arran 10: RRP $109.00 on the variant, Trade Core price $86.90 -> LUC $79.00.
+        with mock.patch.object(entry, "find_for_order", return_value=self.use()), \
+             mock.patch.object(entry.product_search, "trade_catalog_price", return_value=("86.90", "Trade Core")):
+            result = entry.check_price("Arran 10")
+        self.assertEqual(result["decision"], "use")
+        self.assertEqual(result["product"], "Arran 10 Year Old Single Malt Scotch Whisky")
+        self.assertEqual(result["rrp"], "109.00")
+        self.assertEqual(result["luc"], "79.00")
+        self.assertEqual(result["trade_catalog"], "Trade Core")
+
+    def test_no_trade_catalog_price_is_no_luc_never_a_guess(self):
+        with mock.patch.object(entry, "find_for_order", return_value=self.use()), \
+             mock.patch.object(entry.product_search, "trade_catalog_price", return_value=(None, None)):
+            result = entry.check_price("Arran 10")
+        self.assertEqual(result["decision"], "use")
+        self.assertEqual(result["rrp"], "109.00")
+        self.assertIsNone(result["luc"])
+        self.assertNotIn("trade_catalog", result)
+
+    def test_luc_rounds_to_the_nearest_cent(self):
+        # 87.20 / 1.1 = 79.2727... -> 79.27
+        with mock.patch.object(entry, "find_for_order", return_value=self.use()), \
+             mock.patch.object(entry.product_search, "trade_catalog_price", return_value=("87.20", "Trade IBs")):
+            result = entry.check_price("Arran 10")
+        self.assertEqual(result["luc"], "79.27")
+
+    def test_a_trade_catalog_config_problem_is_a_clean_refusal(self):
+        with mock.patch.object(entry, "find_for_order", return_value=self.use()), \
+             mock.patch.object(entry.product_search, "trade_catalog_price", side_effect=ShopifyError("not set up")):
+            with self.assertRaises(ShopifyError):
+                entry.check_price("Arran 10")
+
+
 class ToolTests(unittest.TestCase):
     def names(self, capabilities):
         with mock.patch.object(authorization, "get_order_entry_channels", return_value=frozenset({"C0SALES"})):
@@ -1283,8 +1349,8 @@ class ToolTests(unittest.TestCase):
         return set(names)
 
     def test_order_entry_tools_exist_only_with_the_capability(self):
-        self.assertTrue({"find_customer", "find_variant", "product_link", "prepare_draft_order"} <= self.names(("orders", "order_entry")))
-        for tool in ("find_customer", "find_variant", "product_link", "prepare_draft_order"):
+        self.assertTrue({"find_customer", "find_variant", "product_link", "check_price", "prepare_draft_order"} <= self.names(("orders", "order_entry")))
+        for tool in ("find_customer", "find_variant", "product_link", "check_price", "prepare_draft_order"):
             self.assertNotIn(tool, self.names(("orders", "products", "inventory", "customers")))
 
     def test_there_is_no_tool_that_writes(self):

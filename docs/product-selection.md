@@ -102,3 +102,30 @@ necessarily the same variant `find_for_order`'s own `choice` would pick for chec
 cask, a different pack size): the link is always to TWL's own stock record, never to whatever an order would
 actually use. The URL itself is `https://admin.shopify.com/store/{handle}/products/{id}/variants/{id}`, built
 from each side's `legacyResourceId` - the same form `admin_order_url` already uses for an order.
+
+## Checking a price (RRP and LUC)
+The `check_price` tool (`entry.check_price`) is for "checking prices for products we sell, primarily to trade
+customers" - a distinct capability from order entry, sharing only the product resolution (`find_for_order`) and
+the TWL variant rule (`pick_twl_variant`, same as `product_link` above). It needs no new Shopify scope -
+`read_products` already covers `Catalog.priceList`/`PriceList.prices`.
+
+- **RRP** is simply `ProductVariant.price` on the TWL variant - the number a retail customer pays. Now fetched
+  as part of the same `ProductFields` query used for ranking (`variants { ... price }`), at no extra cost.
+- **LUC** is the trade catalog price with GST excluded: `price / 1.1`, rounded to the cent. Found live: **a
+  product can be priced on more than one trade catalog at once, and the prices don't always agree** - Arran 10
+  is $86.90 on Trade Core but $87.20 on both Trade IBs and Trade Special Releases. So "the trade catalog price"
+  needs a rule, not a pick: `product_search.trade_catalog_price` checks Trade Core, then Trade IBs, then Trade
+  Special Releases, in that order, and uses the first one that actually prices the variant - the exact same
+  "best range wins" precedence `product_pick.py`'s own ranking already uses elsewhere. If the variant isn't
+  priced on any of the three, `luc` is `None` - never a guessed or blended number.
+- **How a trade price is read.** Each `Catalog` (Trade Core, Trade IBs, Trade Special Releases - the same three
+  `resolve_sources` already resolves for ranking) has an associated `PriceList`. `resolve_sources` now also
+  resolves each one's `priceList { id }`, from the SAME `catalogs` query already made for ranking - one extra
+  field, not a second round trip - and caches it the same hour. `trade_catalog_price` then queries
+  `priceList.prices(query: "variant_id:<legacyResourceId>")` for the specific variant, one price list at a
+  time in precedence order, stopping at the first with a result.
+- **A missing price list is a refusal, not a skip - but only for pricing.** If one of the three catalogs has no
+  `priceList` in Shopify, `trade_catalog_price` raises ("Nothing was guessed"), the same fail-loud philosophy
+  `resolve_sources` already uses for a missing collection or catalog. This deliberately does **not** flow
+  through `resolve_sources`'s own hard failure (which order entry's ranking depends on): a price-list problem
+  in Shopify must never break product search or order entry, only pricing itself, when it's actually asked for.

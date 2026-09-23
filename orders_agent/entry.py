@@ -32,9 +32,10 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from .authorization import ORDER_ENTRY, AuthorizationError, audit, resolve_context
 from .config import APPROVE_ROLE, get_shopify_config
-from .product_pick import find_for_order, format_eta
+from .product_pick import find_for_order, format_eta, load_config
 from .sources import draft_orders as shop
 from .sources import order_edit as order_editing
+from .sources import product_search
 from .sources.shopify import ShopifyError
 
 GID = {
@@ -424,6 +425,53 @@ def find_product_link(query):
         "guidance": "Give the user this link, in one short line. Say which product (and variant, if "
         "it's not obviously the main one) it is for.",
     }
+
+
+LUC_PLACES = Decimal("0.01")
+
+
+def check_price(query):
+    """RRP (the TWL variant's own listed price) and LUC (the trade catalog price, GST excluded) for
+    a product - checking prices, not creating an order. Uses the same product-picking knowledge as
+    order entry, so a short name works the same way here, and always prices the TWL variant, never
+    the checkout variant a draft order might actually use. Raises ShopifyError for a bad query or a
+    Shopify failure. Otherwise a decision dict - "use", "ask" or "none" - the model never guesses
+    which product was meant."""
+    decision = find_for_order(query)
+    if decision["decision"] != "use":
+        return decision  # ask / none, same shape order entry's own find_variant already gives
+
+    product = decision["product"]
+    variant, note = pick_twl_variant(product)
+    if variant is None:
+        return {"decision": "none", "note": note, "guidance": "Say plainly why this can't be priced."}
+
+    result = {
+        "decision": "use",
+        "product": product["title"],
+        "variant": variant["title"],
+        "rrp": variant.get("price"),
+    }
+    trade_price, catalog_name = product_search.trade_catalog_price(load_config(), variant["legacy_id"])
+    if trade_price is None:
+        result["luc"] = None
+        result["guidance"] = (
+            "Give the user the RRP. Say plainly that this product has no trade catalog price, so "
+            "there is no LUC to give - don't guess one."
+        )
+    else:
+        # LUC excludes GST: the trade catalog price already includes it, same as every other price
+        # in this store (see docs/product-selection.md, "Product links, not order entry" and
+        # docs/invoicing.md's own note on Shopify prices being GST-inclusive).
+        luc = (Decimal(str(trade_price)) / Decimal("1.1")).quantize(LUC_PLACES, rounding=ROUND_HALF_UP)
+        result["luc"] = str(luc)
+        result["trade_catalog"] = catalog_name
+        result["guidance"] = (
+            "Give the user the RRP and LUC, in one short line each, with a $ sign. If more than one "
+            "trade catalog could apply, say which one the LUC came from. These are selling prices - "
+            "never call them a cost or a margin."
+        )
+    return result
 
 
 def _validate_payload(payload):
