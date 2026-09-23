@@ -90,3 +90,15 @@ codes don't clash and that every alias names a real short form.
 Ordering frequency ("what this customer usually orders", "best sellers"). The Popular tag is used as a tie-break
 only. Real frequency needs order history, and the agent can only see the last 60 days of orders unless Shopify
 approves the optional `read_all_orders` scope.
+
+## Product links, not order entry
+The `product_link` tool (`entry.find_product_link`) reuses this exact same resolution - `find_for_order`, so a
+short name works identically - but for a different purpose: giving someone a Shopify admin link to a product,
+when they ask for one. It is **not** part of order entry and never affects a draft. Once `find_for_order` has
+picked the product, `pick_twl_variant` (in `entry.py`, mirroring `twl-inventory-agent`'s own `_pick_variant`
+exactly) picks **The Whisky List Shop** variant specifically - the product's only variant if it has one, else
+the one titled exactly that, else refused with the actual variant titles named. This is deliberately **not**
+necessarily the same variant `find_for_order`'s own `choice` would pick for checkout (a sample, a specific
+cask, a different pack size): the link is always to TWL's own stock record, never to whatever an order would
+actually use. The URL itself is `https://admin.shopify.com/store/{handle}/products/{id}/variants/{id}`, built
+from each side's `legacyResourceId` - the same form `admin_order_url` already uses for an order.
