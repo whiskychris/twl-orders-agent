@@ -1192,14 +1192,14 @@ class EmailLookupTests(unittest.TestCase):
 
 
 def link_variant(**over):
-    base = {"id": "gid://shopify/ProductVariant/1", "title": "The Whisky List Shop", "sku": "", "stock": 10, "legacy_id": "111"}
+    base = {"id": "gid://shopify/ProductVariant/1", "title": "The Whisky List Shop", "sku": "", "stock": 10, "legacy_id": "111", "price": "109.00"}
     return {**base, **over}
 
 
 def link_product(**over):
     base = {
         "id": "gid://shopify/Product/1", "title": "Arran 10 Year Old Single Malt Scotch Whisky",
-        "legacy_id": "1", "variants": [link_variant()],
+        "legacy_id": "1", "variants": [link_variant()], "tags": ["brand_Arran", "TWL Brand"],
     }
     return {**base, **over}
 
@@ -1276,6 +1276,103 @@ class FindProductLinkTests(unittest.TestCase):
         self.assertNotIn("url", result)
 
 
+class CheckPriceTests(unittest.TestCase):
+    """check_price's own job: picking the TWL variant for its RRP, and combining it with
+    trade_catalog_price for the LUC. Product resolution itself is find_for_order's job (tested in
+    test_product_pick.py); trade_catalog_price's own precedence is tested in test_product_pick.py too."""
+
+    def use(self, product=None):
+        return {"decision": "use", "product": product or link_product(), "choice": {}, "unavailable": []}
+
+    def test_a_shopify_failure_becomes_a_clean_refusal(self):
+        with mock.patch.object(entry, "find_for_order", side_effect=ShopifyError("down")):
+            with self.assertRaises(ShopifyError):
+                entry.check_price("Arran 10")
+
+    def test_no_match_is_passed_through_unchanged(self):
+        decision = {"decision": "none", "unavailable": []}
+        with mock.patch.object(entry, "find_for_order", return_value=decision):
+            result = entry.check_price("Nonexistent Whisky")
+        self.assertEqual(result, decision)
+
+    def test_several_matches_are_passed_through_unchanged(self):
+        decision = {"decision": "ask", "options": [{"number": 1, "name": "x"}], "more_matches": 0, "unavailable": []}
+        with mock.patch.object(entry, "find_for_order", return_value=decision):
+            result = entry.check_price("Arran")
+        self.assertEqual(result, decision)
+
+    def test_ambiguous_variant_is_a_none_decision_with_a_note(self):
+        variants = [link_variant(id="gid://shopify/ProductVariant/2", title="Trade"), link_variant(title="Retail")]
+        with mock.patch.object(entry, "find_for_order", return_value=self.use(link_product(variants=variants))):
+            result = entry.check_price("Arran 10")
+        self.assertEqual(result["decision"], "none")
+        self.assertIn("Trade", result["note"])
+
+    def test_all_three_prices_for_the_reported_live_case(self):
+        # Arran 10 (tagged TWL Brand): RRP $109.00, Trade Core $86.90 -> LUC $79.00,
+        # Rewards Member 10% off RRP -> $98.10.
+        with mock.patch.object(entry, "find_for_order", return_value=self.use()), \
+             mock.patch.object(entry.product_search, "trade_catalog_price", return_value=("86.90", "Trade Core")):
+            result = entry.check_price("Arran 10")
+        self.assertEqual(result["decision"], "use")
+        self.assertEqual(result["product"], "Arran 10 Year Old Single Malt Scotch Whisky")
+        self.assertEqual(result["rrp"], "109.00")
+        self.assertEqual(result["luc"], "79.00")
+        self.assertEqual(result["trade_catalog"], "Trade Core")
+        self.assertEqual(result["rewards_member_price"], "98.10")
+
+    def test_no_trade_catalog_price_is_no_luc_never_a_guess(self):
+        with mock.patch.object(entry, "find_for_order", return_value=self.use()), \
+             mock.patch.object(entry.product_search, "trade_catalog_price", return_value=(None, None)):
+            result = entry.check_price("Arran 10")
+        self.assertEqual(result["decision"], "use")
+        self.assertEqual(result["rrp"], "109.00")
+        self.assertIsNone(result["luc"])
+        self.assertNotIn("trade_catalog", result)
+
+    def test_luc_rounds_to_the_nearest_cent(self):
+        # 87.20 / 1.1 = 79.2727... -> 79.27
+        with mock.patch.object(entry, "find_for_order", return_value=self.use()), \
+             mock.patch.object(entry.product_search, "trade_catalog_price", return_value=("87.20", "Trade IBs")):
+            result = entry.check_price("Arran 10")
+        self.assertEqual(result["luc"], "79.27")
+
+    def test_a_trade_catalog_config_problem_is_a_clean_refusal(self):
+        with mock.patch.object(entry, "find_for_order", return_value=self.use()), \
+             mock.patch.object(entry.product_search, "trade_catalog_price", side_effect=ShopifyError("not set up")):
+            with self.assertRaises(ShopifyError):
+                entry.check_price("Arran 10")
+
+    def test_twl_ib_gets_twenty_percent_off(self):
+        product = link_product(tags=["brand_Adelphi", "TWL IB"])
+        with mock.patch.object(entry, "find_for_order", return_value=self.use(product)), \
+             mock.patch.object(entry.product_search, "trade_catalog_price", return_value=(None, None)):
+            result = entry.check_price("Adelphi")
+        self.assertEqual(result["rewards_member_price"], "87.20")  # 109.00 * 0.8
+
+    def test_twl_exclusive_gets_ten_percent_off_same_as_twl_brand(self):
+        product = link_product(tags=["productGroup_twl-exclusive"])
+        with mock.patch.object(entry, "find_for_order", return_value=self.use(product)), \
+             mock.patch.object(entry.product_search, "trade_catalog_price", return_value=(None, None)):
+            result = entry.check_price("Special Release")
+        self.assertEqual(result["rewards_member_price"], "98.10")
+
+    def test_a_product_with_none_of_the_qualifying_tags_has_no_rewards_member_price(self):
+        product = link_product(tags=["some_other_tag"])
+        with mock.patch.object(entry, "find_for_order", return_value=self.use(product)), \
+             mock.patch.object(entry.product_search, "trade_catalog_price", return_value=(None, None)):
+            result = entry.check_price("Untagged Thing")
+        self.assertIsNone(result["rewards_member_price"])
+
+    def test_tier_one_wins_precedence_over_tier_two_if_a_product_is_tagged_both(self):
+        # An unlikely data anomaly, but the same "best range wins" precedence applies here too.
+        product = link_product(tags=["TWL Brand", "TWL IB"])
+        with mock.patch.object(entry, "find_for_order", return_value=self.use(product)), \
+             mock.patch.object(entry.product_search, "trade_catalog_price", return_value=(None, None)):
+            result = entry.check_price("Arran 10")
+        self.assertEqual(result["rewards_member_price"], "98.10")  # 10%, not 20%
+
+
 class ToolTests(unittest.TestCase):
     def names(self, capabilities):
         with mock.patch.object(authorization, "get_order_entry_channels", return_value=frozenset({"C0SALES"})):
@@ -1283,8 +1380,8 @@ class ToolTests(unittest.TestCase):
         return set(names)
 
     def test_order_entry_tools_exist_only_with_the_capability(self):
-        self.assertTrue({"find_customer", "find_variant", "product_link", "prepare_draft_order"} <= self.names(("orders", "order_entry")))
-        for tool in ("find_customer", "find_variant", "product_link", "prepare_draft_order"):
+        self.assertTrue({"find_customer", "find_variant", "product_link", "check_price", "prepare_draft_order"} <= self.names(("orders", "order_entry")))
+        for tool in ("find_customer", "find_variant", "product_link", "check_price", "prepare_draft_order"):
             self.assertNotIn(tool, self.names(("orders", "products", "inventory", "customers")))
 
     def test_there_is_no_tool_that_writes(self):

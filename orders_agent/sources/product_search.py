@@ -21,7 +21,7 @@ _sources = {"value": None, "loaded_at": 0.0}
 SOURCES = """
 query Sources($collections: String!) {
   collections(first: 20, query: $collections) { nodes { id title } }
-  catalogs(first: 50) { nodes { title publication { id } } }
+  catalogs(first: 50) { nodes { title publication { id } priceList { id } } }
 }
 """
 
@@ -44,7 +44,17 @@ fragment ProductFields on Product {
   inTradeCore: publishedOnPublication(publicationId: $tradeCore)
   inTradeIbs: publishedOnPublication(publicationId: $tradeIbs)
   inTradeSpecial: publishedOnPublication(publicationId: $tradeSpecial)
-  variants(first: 20) { nodes { id title sku inventoryQuantity legacyResourceId } }
+  variants(first: 20) { nodes { id title sku inventoryQuantity legacyResourceId price } }
+}
+"""
+
+PRICE_LIST_PRICE = """
+query PriceListPrice($id: ID!, $query: String!) {
+  priceList(id: $id) {
+    prices(first: 1, query: $query) {
+      nodes { price { amount currencyCode } }
+    }
+  }
 }
 """
 
@@ -115,10 +125,14 @@ def resolve_sources(config):
     for node in _nodes(data.get("collections")):
         by_title.setdefault(node["title"], []).append(node["id"])
     catalogs = {}
+    price_lists = {}
     for node in _nodes(data.get("catalogs")):
         publication = (node.get("publication") or {}).get("id")
         if publication:
             catalogs.setdefault(node["title"], []).append(publication)
+        price_list = (node.get("priceList") or {}).get("id")
+        if price_list:
+            price_lists.setdefault(node["title"], []).append(price_list)
 
     problems = []
     ids = {}
@@ -135,6 +149,13 @@ def resolve_sources(config):
             "names in orders_agent/data/product_priority.json against Shopify. Nothing was guessed."
         )
 
+    # Price lists are resolved here too (same catalogs, same one API call), but never raise ranking
+    # itself - only trade_catalog_price does, and only when pricing is actually asked for, so a
+    # price-list problem in Shopify never breaks order entry's product search.
+    def price_list_id(name):
+        matches = price_lists.get(name, [])
+        return matches[0] if len(matches) == 1 else None
+
     value = {
         "ourBrands": ids[("collection", tiers["1"]["collection"])],
         "ibCollection": ids[("collection", tiers["2"]["collection"])],
@@ -142,6 +163,9 @@ def resolve_sources(config):
         "tradeCore": ids[("catalog", tiers["1"]["catalog"])],
         "tradeIbs": ids[("catalog", tiers["2"]["catalog"])],
         "tradeSpecial": ids[("catalog", tiers["3"]["catalog"])],
+        "tradeCorePriceList": price_list_id(tiers["1"]["catalog"]),
+        "tradeIbsPriceList": price_list_id(tiers["2"]["catalog"]),
+        "tradeSpecialPriceList": price_list_id(tiers["3"]["catalog"]),
     }
     _sources["value"], _sources["loaded_at"] = value, now
     return value
@@ -149,6 +173,35 @@ def resolve_sources(config):
 
 def clear_cache():
     _sources["value"], _sources["loaded_at"] = None, 0.0
+
+
+# Tier order = precedence: the "best range wins" rule the ranking already uses (Trade Core beats
+# Trade IBs beats Special Releases). A product can be priced on more than one trade catalog at
+# once, and the prices don't always agree - found live (Arran 10: Trade Core $86.90, Trade IBs and
+# Special Releases $87.20) - so which one wins has to be a rule, not arbitrary.
+TRADE_PRICE_LIST_KEYS = ("tradeCorePriceList", "tradeIbsPriceList", "tradeSpecialPriceList")
+
+
+def trade_catalog_price(config, variant_legacy_id):
+    """The trade price for one variant, checked in tier order, stopping at the first catalog that
+    actually prices it. Returns (amount as a string, catalog name), or (None, None) if the variant
+    isn't priced on any of the three. Raises ShopifyError if a catalog's price list itself can't be
+    resolved (see resolve_sources) - a pricing-specific failure, never raised by product picking."""
+    ids = resolve_sources(config)
+    tiers = config["tiers"]
+    for tier, key in zip(("1", "2", "3"), TRADE_PRICE_LIST_KEYS):
+        name = tiers[tier]["catalog"]
+        price_list_id = ids.get(key)
+        if not price_list_id:
+            raise ShopifyError(
+                f"TWL's trade catalogs aren't set up for pricing: no price list found for '{name}'. "
+                "Someone needs to check that catalog in Shopify. Nothing was guessed."
+            )
+        data = graphql(PRICE_LIST_PRICE, {"id": price_list_id, "query": f"variant_id:{variant_legacy_id}"})
+        nodes = _nodes((data.get("priceList") or {}).get("prices"))
+        if nodes:
+            return nodes[0]["price"]["amount"], name
+    return None, None
 
 
 def _product(node):
@@ -176,6 +229,7 @@ def _product(node):
                 "sku": variant.get("sku") or "",
                 "stock": variant.get("inventoryQuantity") or 0,
                 "legacy_id": variant.get("legacyResourceId"),
+                "price": variant.get("price"),
             }
             for variant in _nodes(node.get("variants"))
         ],
