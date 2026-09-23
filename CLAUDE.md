@@ -88,6 +88,13 @@ These stop a future session undoing decisions that were made on purpose.
   probe for customers.
 - **Do not implement per-user Shopify OAuth or Shopify staff-permission inheritance** unless the
   architecture is deliberately reconsidered. The Shopify app uses one shared credential (read scopes plus `write_draft_orders`, used only by `entry.execute`).
+- **Some read tools are shared with other agents** (`orders_agent/shared.py`, served on `/v1/tools` and
+  `/v1/tool`, reached only through the gateway). The rewards agent's model calls them as the person it is
+  answering, and `resolve_context` decides access exactly as for a Slack message. Only reads belong in
+  `shared.py`; never add a `prepare_*` tool or anything that writes. See `docs/shared-tools.md`.
+- **A new order can arrive from the rewards agent as a handoff** (`context.action == "prepare_draft_order"`
+  in `main.py`). It only prepares the draft through `entry.prepare`, posted with this agent's own approval
+  buttons; nothing is created until someone with `orders.approve` presses one.
 - Permission changes can take up to five minutes to apply (per-instance cache).
 
 ## Style

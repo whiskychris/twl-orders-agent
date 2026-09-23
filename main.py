@@ -17,7 +17,7 @@ import uuid
 
 from flask import Flask, jsonify, request
 
-from orders_agent import entry
+from orders_agent import entry, shared
 from orders_agent.authorization import (
     ALL_CAPABILITIES,
     AuthorizationError,
@@ -134,6 +134,25 @@ def v1_message():
     # decision (Send Invoice / Edit Order / Cancel), re-priced with whatever just changed. Deterministic,
     # no model involved - the order name comes from the handoff's own structured context, not parsed
     # from a sentence. Same shape as the mark_order_paid dispatch above.
+    # A handoff from the rewards agent: an approved request to draft an order for a customer (a Rewards
+    # Member), with the customer and lines as structured context rather than a sentence to parse. This
+    # only PREPARES the draft, exactly as prepare_draft_order does, and posts it with this agent's own
+    # approval buttons. Nothing is created until someone with orders.approve presses one.
+    if context.get("action") == "prepare_draft_order":
+        try:
+            ctx = resolve_context(user, conversation, request_id)
+        except AuthorizationError as exc:
+            return jsonify(text=str(exc))
+        except AuthorizationUnavailable:
+            app.logger.exception("permissions unavailable")
+            return jsonify(error="permissions could not be checked, so nothing was drafted"), 503
+        target = {key: context.get(key) for key in ("company_id", "location_id", "customer_id")}
+        try:
+            result = entry.prepare(ctx, target, context.get("lines"), context.get("note"))
+        except (entry.EntryError, shopify.ShopifyError) as exc:
+            return jsonify(text=f"I couldn't draft that order: {exc}")
+        return jsonify(text=result["text"], proposal=result["proposal"])
+
     if context.get("action") == "prepare_invoice_confirmation":
         try:
             ctx = resolve_context(user, conversation, request_id)
@@ -178,6 +197,42 @@ def v1_message():
         return jsonify(text=state.text, proposal=state.proposal)
 
     return jsonify(text=answer.strip() or "I couldn't find an answer to that.")
+
+
+@app.post("/v1/tools")
+def v1_tools():
+    """The shared, read-only tools this person may call from another agent (through the gateway only).
+    Access is worked out exactly as for /v1/message. See orders_agent/shared.py."""
+    data = request.get_json(silent=True) or {}
+    try:
+        ctx = resolve_context(data.get("user"), data.get("conversation"), uuid.uuid4().hex[:12])
+    except AuthorizationError:
+        return jsonify(tools=[])
+    except AuthorizationUnavailable:
+        app.logger.exception("permissions unavailable")
+        return jsonify(error="permissions could not be checked"), 503
+    return jsonify(tools=shared.available(ctx))
+
+
+@app.post("/v1/tool")
+def v1_tool():
+    """Run one shared tool for another agent, as the person it is answering (through the gateway only).
+    Read only. Access is re-checked here on every call, not just when the tools were listed."""
+    data = request.get_json(silent=True) or {}
+    request_id = uuid.uuid4().hex[:12]
+    try:
+        ctx = resolve_context(data.get("user"), data.get("conversation"), request_id)
+    except AuthorizationError as exc:
+        return jsonify(error=str(exc))
+    except AuthorizationUnavailable:
+        app.logger.exception("permissions unavailable")
+        return jsonify(error="permissions could not be checked, so nothing was looked up"), 503
+    name = str(data.get("tool", "")).strip()
+    app.logger.info("shared tool %s for %s via %s", name, ctx.user_id, data.get("caller_agent_id"))
+    try:
+        return jsonify(result=shared.run(ctx, name, data.get("input")))
+    except (shared.ToolRefused, entry.EntryError, shopify.ShopifyError) as exc:
+        return jsonify(error=str(exc))
 
 
 @app.post("/v1/act")

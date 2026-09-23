@@ -44,10 +44,10 @@ jobs:
             --service-account=twl-orders-agent@the-rabbit-hole-509200.iam.gserviceaccount.com \
             --no-allow-unauthenticated \
             --update-env-vars=ANTHROPIC_FEDERATION_RULE_ID=${{ vars.ANTHROPIC_FEDERATION_RULE_ID }},ANTHROPIC_ORGANIZATION_ID=${{ vars.ANTHROPIC_ORGANIZATION_ID }},ANTHROPIC_SERVICE_ACCOUNT_ID=${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }},ANTHROPIC_WORKSPACE_ID=${{ vars.ANTHROPIC_WORKSPACE_ID }} \
-            --memory=1Gi \
+            --memory=2Gi \
             --cpu=1 \
-            --concurrency=1 \
+            --concurrency=4 \
             --max-instances=3 \
-            --min-instances=0 \
+            --min-instances=1 \
             --timeout=900 \
             --quiet

@@ -895,15 +895,10 @@ class ConfigTests(unittest.TestCase):
 
 class ToolTests(unittest.TestCase):
     def test_find_variant_takes_only_a_query_and_asks_for_no_sku(self):
-        import inspect
-        import re
-        from orders_agent.tools import build_server
-        source = inspect.getsource(build_server)
-        block = source[source.index('"find_variant",\n            "Find the product'):]
-        block = block[: block.index("find_variant,\n        )")]
-        properties = set(re.findall(r'"(\w+)": \{\*\*STRING', block))
-        self.assertEqual(properties, {"query"})
-        self.assertIn("SKUs are not usable", block)
+        from orders_agent import shared
+        find_variant = shared.BY_NAME["find_variant"]
+        self.assertEqual(set(find_variant.schema["properties"]), {"query"})
+        self.assertIn("SKUs are not usable", find_variant.description)
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-from . import entry, product_pick
+from . import entry, shared
 from .authorization import ORDER_ENTRY, audit_tool
 from .sources import draft_orders, shopify
 
@@ -49,9 +49,8 @@ def _schema(properties, required=()):
     return {"type": "object", "properties": properties, "required": list(required)}
 
 
-STRING = {"type": "string"}
-INTEGER = {"type": "integer"}
-BOOLEAN = {"type": "boolean"}
+STRING = shared.STRING
+INTEGER = shared.INTEGER
 
 
 class RequestState:
@@ -114,200 +113,19 @@ def build_server(ctx, state=None):
         current_time,
     )
 
-    # --- orders capability ----------------------------------------------------------------
+    # --- read-only tools, shared with other agents (shared.py) ------------------------------------
+    # orders, products, inventory and customers, plus find_variant and check_price under order entry.
+    # Each is registered only if the caller has its capability.
 
-    if ctx.has("orders"):
+    def shared_handler(spec):
+        async def handler(args):
+            return await call(spec.name, spec.capability, spec.run, ctx, args)
 
-        async def search_orders(args):
-            return await call(
-                "search_orders",
-                "orders",
-                shopify.search_orders,
-                args.get("query", ""),
-                limit=args.get("limit", 20),
-                oldest_first=bool(args.get("oldest_first", False)),
-                include_customer=ctx.has("customers"),
-            )
+        return handler
 
-        add(
-            "search_orders",
-            "List Shopify orders matching a search, newest first. Uses Shopify search syntax, for "
-            "example: created_at:>=2026-09-20T00:00:00+10:00, financial_status:paid, "
-            "fulfillment_status:unfulfilled, status:open, sku:ABC123, tag:vip, name:1234. Returns "
-            "at most 50 orders with status, total, item lines and where they were sold. If the "
-            "user has no customer access, only those structured filters work (no free text, "
-            "names, emails or addresses). Only orders from the last 60 days are visible unless "
-            "the store granted read_all_orders.\n"
-            "customer_tag:a,b (comma means OR) filters by the CUSTOMER's tags - this service's own "
-            "filter, not Shopify's (Shopify has no direct way to search orders by the customer's "
-            "tags), so it costs extra: it scans recent orders rather than a single lookup, and needs "
-            "customer access. TWL's 'trade customers' (bottle shops, online retailers, bars, pubs, "
-            "restaurants - resellers and hospitality) are tagged Off-Prem (retailers) or On-Prem "
-            "(hospitality) on the customer, so 'orders from trade customers' is "
-            "customer_tag:Off-Prem,On-Prem. Combine with other filters as usual, for example "
-            "customer_tag:Off-Prem,On-Prem financial_status:paid. If a scan can't find enough within "
-            "its limit, the result says so and suggests narrowing the search (a date range, for "
-            "example) rather than silently under-reporting.",
-            _schema(
-                {
-                    "query": {**STRING, "description": "Shopify order search string. Empty means all recent orders."},
-                    "limit": {**INTEGER, "description": "How many orders, 1 to 50. Default 20."},
-                    "oldest_first": {**BOOLEAN, "description": "Oldest first instead of newest first."},
-                },
-                required=["query"],
-            ),
-            search_orders,
-        )
-
-        async def get_order(args):
-            return await call(
-                "get_order",
-                "orders",
-                shopify.get_order,
-                args.get("order", ""),
-                include_customer=ctx.has("customers"),
-            )
-
-        add(
-            "get_order",
-            "Full detail for one order by its number (for example 1234 or #1234): status, totals, "
-            "shipping method, item lines, fulfilments and tracking numbers. Customer details and "
-            "the order note are included only if the user has customer access.",
-            _schema({"order": {**STRING, "description": "Order number, with or without #."}}, required=["order"]),
-            get_order,
-        )
-
-        async def summarise_orders(args):
-            return await call(
-                "summarise_orders",
-                "orders",
-                shopify.summarise_orders,
-                args.get("query", ""),
-                include_customer=ctx.has("customers"),
-                max_pages=args.get("max_pages", 4),
-            )
-
-        add(
-            "summarise_orders",
-            "Count orders and total their value for a search (up to 2,000 orders), with counts by "
-            "payment and fulfilment status. Use this for 'how many orders' and 'how much did we "
-            "sell' questions instead of listing orders. Same search syntax and limits as "
-            "search_orders.",
-            _schema(
-                {
-                    "query": {**STRING, "description": "Shopify order search string."},
-                    "max_pages": {**INTEGER, "description": "Pages of 250 orders to read, 1 to 8. Default 4."},
-                },
-                required=["query"],
-            ),
-            summarise_orders,
-        )
-
-    # --- products capability ----------------------------------------------------------------
-
-    if ctx.has("products"):
-
-        async def search_products(args):
-            return await call(
-                "search_products",
-                "products",
-                shopify.search_products,
-                args.get("query", ""),
-                limit=args.get("limit", 20),
-                include_inventory=ctx.has("inventory"),
-            )
-
-        add(
-            "search_products",
-            "Find products and their variants: title, status, vendor, type, SKUs and selling "
-            "price. Stock quantities are included only if the user has inventory access. Search "
-            "syntax examples: title:*macallan*, vendor:Adelphi, product_type:whisky, "
-            "status:active, sku:ABC123, tag:rare. Prices are selling prices. Costs and margins are "
-            "not available.",
-            _schema(
-                {
-                    "query": {**STRING, "description": "Shopify product search string."},
-                    "limit": {**INTEGER, "description": "How many products, 1 to 25. Default 20."},
-                },
-                required=["query"],
-            ),
-            search_products,
-        )
-
-    # --- inventory capability ---------------------------------------------------------------
-
-    if ctx.has("inventory"):
-
-        async def get_inventory(args):
-            return await call(
-                "get_inventory", "inventory", shopify.get_inventory, args.get("query", ""), limit=args.get("limit", 10)
-            )
-
-        add(
-            "get_inventory",
-            "Stock by location for inventory items matching a search, for example sku:ABC123. "
-            "Returns available (can be sold), on_hand (physically there), committed (reserved by "
-            "open orders) and incoming (on the way in) per location.",
-            _schema(
-                {
-                    "query": {**STRING, "description": "Inventory item search, for example sku:ABC123."},
-                    "limit": {**INTEGER, "description": "How many items, 1 to 25. Default 10."},
-                },
-                required=["query"],
-            ),
-            get_inventory,
-        )
-
-        async def low_stock(args):
-            return await call(
-                "low_stock",
-                "inventory",
-                shopify.low_stock,
-                threshold=args.get("threshold", 5),
-                limit=args.get("limit", 50),
-            )
-
-        add(
-            "low_stock",
-            "Active product variants whose total inventory is at or below a threshold, lowest "
-            "first. Use for 'what is running low' and 'what is out of stock' (threshold 0).",
-            _schema(
-                {
-                    "threshold": {**INTEGER, "description": "Inventory at or below this number. Default 5."},
-                    "limit": {**INTEGER, "description": "How many variants, 1 to 100. Default 50."},
-                }
-            ),
-            low_stock,
-        )
-
-    # --- customers capability ---------------------------------------------------------------
-
-    if ctx.has("customers"):
-
-        async def search_customers(args):
-            return await call(
-                "search_customers",
-                "customers",
-                shopify.search_customers,
-                args.get("query", ""),
-                limit=args.get("limit", 10),
-            )
-
-        add(
-            "search_customers",
-            "Find customers: name, email, phone, number of orders, total spent, last order, tags "
-            "and city. Search syntax examples: email:name@example.com, last_name:Smith, "
-            "orders_count:>5, total_spent:>1000, tag:vip, country:AU. Personal data. Share only "
-            "what the question needs.",
-            _schema(
-                {
-                    "query": {**STRING, "description": "Shopify customer search string."},
-                    "limit": {**INTEGER, "description": "How many customers, 1 to 25. Default 10."},
-                },
-                required=["query"],
-            ),
-            search_customers,
-        )
+    for spec in shared.SHARED_TOOLS:
+        if ctx.has(spec.capability):
+            add(spec.name, spec.description, spec.schema, shared_handler(spec))
 
     # --- order entry capability ---------------------------------------------------------------
     # None of these can create anything. prepare_draft_order only prices a draft and hands it to the
@@ -345,31 +163,6 @@ def build_server(ctx, state=None):
             find_customer,
         )
 
-        async def find_variant(args):
-            return await call(
-                "find_variant",
-                ORDER_ENTRY,
-                product_pick.find_for_order,
-                args.get("query", ""),
-                include_inventory=ctx.has("inventory"),
-            )
-
-        add(
-            "find_variant",
-            "Find the product to order from what the user typed (for example 'Arran 10' or 'Ardnahoe "
-            "Bholsa'). TWL's rules choose, not you. The answer has a `decision`: 'use' means one clear winner "
-            "(use its variant_id and tell the user which product you chose); 'ask' means several plausible "
-            "products (list the numbered options and ask which, and never pick for them); 'none' means nothing "
-            "orderable matched (say so, and mention anything in `unavailable`, such as out of stock). Samples, "
-            "gift packs, bottle splits and out-of-stock products are never offered. Use only variant_ids this "
-            "tool returned. Search by name: SKUs are not usable.",
-            _schema(
-                {"query": {**STRING, "description": "The product as the user named it, for example 'Arran 10'."}},
-                required=["query"],
-            ),
-            find_variant,
-        )
-
         async def product_link(args):
             return await call("product_link", ORDER_ENTRY, entry.find_product_link, args.get("query", ""))
 
@@ -386,30 +179,6 @@ def build_server(ctx, state=None):
                 required=["query"],
             ),
             product_link,
-        )
-
-        async def check_price(args):
-            return await call("check_price", ORDER_ENTRY, entry.check_price, args.get("query", ""))
-
-        add(
-            "check_price",
-            "Look up the RRP, LUC and Rewards Member price for a product - checking prices, not raising "
-            "an order. RRP is the price on The Whisky List's own variant. LUC is the trade catalog price "
-            "with GST excluded (divided by 1.1); a product not on any trade catalog has no LUC. The "
-            "Rewards Member price is RRP less 10% (TWL Brand or TWL Exclusive) or 20% (TWL IB / "
-            "Independent Bottler); a product with none of those tags has no Rewards Member price. These "
-            "are all selling prices, never a cost or a margin. Returns a `decision`: 'use' means one "
-            "product matched, with `rrp`, `luc` (and `trade_catalog`, when there's more than one "
-            "candidate, naming which one the LUC came from) and `rewards_member_price`, any of which may "
-            "be null when it doesn't apply - say so plainly, never guess a number; 'ask' means several "
-            "products matched - list the numbered options and ask which, never pick yourself; 'none' "
-            "means nothing matched, or the product has more than one variant and none of them is TWL's "
-            "own.",
-            _schema(
-                {"query": {**STRING, "description": "The product as the user named it, for example 'Arran 10'."}},
-                required=["query"],
-            ),
-            check_price,
         )
 
         async def prepare_draft_order(args):
