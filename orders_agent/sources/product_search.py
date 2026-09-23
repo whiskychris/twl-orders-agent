@@ -36,6 +36,7 @@ fragment ProductFields on Product {
   productType
   tags
   totalInventory
+  legacyResourceId
   preOrderEta: metafield(namespace: "backendProduct", key: "preOrderEta") { value }
   inOurBrands: inCollection(id: $ourBrands)
   inIbCollection: inCollection(id: $ibCollection)
@@ -43,7 +44,7 @@ fragment ProductFields on Product {
   inTradeCore: publishedOnPublication(publicationId: $tradeCore)
   inTradeIbs: publishedOnPublication(publicationId: $tradeIbs)
   inTradeSpecial: publishedOnPublication(publicationId: $tradeSpecial)
-  variants(first: 20) { nodes { id title sku inventoryQuantity } }
+  variants(first: 20) { nodes { id title sku inventoryQuantity legacyResourceId } }
 }
 """
 
@@ -174,9 +175,11 @@ def _product(node):
                 "title": variant.get("title") or "",
                 "sku": variant.get("sku") or "",
                 "stock": variant.get("inventoryQuantity") or 0,
+                "legacy_id": variant.get("legacyResourceId"),
             }
             for variant in _nodes(node.get("variants"))
         ],
+        "legacy_id": node.get("legacyResourceId"),
     }
 
 

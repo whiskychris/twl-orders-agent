@@ -370,6 +370,24 @@ def build_server(ctx, state=None):
             find_variant,
         )
 
+        async def product_link(args):
+            return await call("product_link", ORDER_ENTRY, entry.find_product_link, args.get("query", ""))
+
+        add(
+            "product_link",
+            "Give a Shopify admin link to a product's page, for a person to open directly - only when asked "
+            "for a link, not as part of ordinary order entry. Always links The Whisky List's own variant (The "
+            "Whisky List Shop), never the checkout variant an order would actually use. Returns a `decision`: "
+            "'use' means one product matched, with a `url`; 'ask' means several products matched - list the "
+            "numbered options and ask which, never pick yourself; 'none' means nothing matched, or the product "
+            "has more than one variant and none of them is TWL's own.",
+            _schema(
+                {"query": {**STRING, "description": "The product as the user named it, for example 'Arran 10'."}},
+                required=["query"],
+            ),
+            product_link,
+        )
+
         async def prepare_draft_order(args):
             audit_tool(ctx, "prepare_draft_order", ORDER_ENTRY, allowed=True)
             try:

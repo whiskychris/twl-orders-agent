@@ -495,6 +495,15 @@ class SearchTests(unittest.TestCase):
         self.assertIsNone(search._product({**base, "preOrderEta": None})["pre_order_eta"])
         self.assertIsNone(search._product({**base, "preOrderEta": {"value": ""}})["pre_order_eta"])
 
+    def test_legacy_ids_are_parsed_for_the_product_and_each_variant(self):
+        base = {
+            "id": "i", "title": "t", "handle": "h", "legacyResourceId": "1",
+            "variants": {"nodes": [{"id": "v1", "title": "Default Title", "legacyResourceId": "11"}]},
+        }
+        product = search._product(base)
+        self.assertEqual(product["legacy_id"], "1")
+        self.assertEqual(product["variants"][0]["legacy_id"], "11")
+
     def test_sources_are_resolved_by_name_cached_and_a_missing_one_refuses(self):
         search.clear_cache()
         self.addCleanup(search.clear_cache)
@@ -563,6 +572,12 @@ class FindForOrderTests(unittest.TestCase):
         self.assertEqual(result["choice"]["name"], ARRAN10["title"])
         self.assertTrue(any(call == "handle:arran-10" for call in calls))                                  # the quick entry by handle
         self.assertTrue(any("title:*arran* AND title:*10*" in call and "inventory_total:>0" in call for call in calls))
+
+    def test_a_use_decision_also_carries_the_raw_product(self):
+        # Used by entry.find_product_link to pick the TWL variant, which may differ from "choice"
+        # (the checkout variant) - order entry's own flow never reads this key.
+        result = decide("Arran 10", [ARRAN10])
+        self.assertIs(result["product"], ARRAN10)
 
     def test_an_unknown_product_says_nothing_matched_and_why(self):
         # In a TWL range but not tagged TWL Brand, so with no stock it is not offered, and the reason is given.

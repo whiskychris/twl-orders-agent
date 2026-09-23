@@ -32,7 +32,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from .authorization import ORDER_ENTRY, AuthorizationError, audit, resolve_context
 from .config import APPROVE_ROLE, get_shopify_config
-from .product_pick import format_eta
+from .product_pick import find_for_order, format_eta
 from .sources import draft_orders as shop
 from .sources import order_edit as order_editing
 from .sources.shopify import ShopifyError
@@ -43,6 +43,8 @@ GID = {
     "customer": re.compile(r"^gid://shopify/Customer/\d+$"),
     "variant": re.compile(r"^gid://shopify/ProductVariant/\d+$"),
 }
+
+TWL_VARIANT_TITLE = "the whisky list shop"
 TOKEN = re.compile(r"^[a-z0-9][a-z0-9-]{6,90}$")
 
 MAX_LINES = 30
@@ -370,6 +372,58 @@ def render(payload, calc, warnings):
 def admin_order_url(legacy_id):
     handle = get_shopify_config()["shop"].removesuffix(".myshopify.com")
     return f"https://admin.shopify.com/store/{handle}/orders/{legacy_id}"
+
+
+def admin_product_url(product_legacy_id, variant_legacy_id):
+    """The Shopify admin page for one product variant - same admin.shopify.com/store/... form as
+    admin_order_url above, for a product/variant instead of an order."""
+    handle = get_shopify_config()["shop"].removesuffix(".myshopify.com")
+    return f"https://admin.shopify.com/store/{handle}/products/{product_legacy_id}/variants/{variant_legacy_id}"
+
+
+def pick_twl_variant(product):
+    """The variant that represents TWL's own stock: the product's only variant if it has just one
+    (most products), or the one titled exactly "The Whisky List Shop" if it has several - never any
+    other variant, and NEVER necessarily the checkout variant order entry itself would pick (a sample,
+    a different pack size, a specific cask). The same rule twl-inventory-agent's own _pick_variant
+    uses. Returns (variant, None), or (None, explanation) if the product has several variants and
+    none is the TWL one - never guessed at."""
+    variants = product["variants"]
+    if len(variants) == 1:
+        return variants[0], None
+    for variant in variants:
+        if variant["title"].strip().lower() == TWL_VARIANT_TITLE:
+            return variant, None
+    titles = ", ".join(v["title"] for v in variants if v["title"]) or "none named"
+    return None, (
+        f"\"{product['title']}\" has {len(variants)} variants ({titles}) and none of them is "
+        "\"The Whisky List Shop\", so I don't know which one is TWL's own stock. This needs "
+        "sorting out in Shopify - I won't guess."
+    )
+
+
+def find_product_link(query):
+    """A Shopify admin link to a product's TWL variant - never the checkout variant order entry
+    itself would use. Uses the same product-picking knowledge as order entry (product_pick.py), so
+    a short name works the same way here. Raises ShopifyError for a bad query or a Shopify failure
+    (the tool layer turns that into a clean error). Otherwise a decision dict - "use", "ask" or
+    "none" - the model never guesses which product was meant."""
+    decision = find_for_order(query)
+    if decision["decision"] != "use":
+        return decision  # ask / none, same shape order entry's own find_variant already gives
+
+    product = decision["product"]
+    variant, note = pick_twl_variant(product)
+    if variant is None:
+        return {"decision": "none", "note": note, "guidance": "Say plainly why this can't be linked."}
+    return {
+        "decision": "use",
+        "product": product["title"],
+        "variant": variant["title"],
+        "url": admin_product_url(product["legacy_id"], variant["legacy_id"]),
+        "guidance": "Give the user this link, in one short line. Say which product (and variant, if "
+        "it's not obviously the main one) it is for.",
+    }
 
 
 def _validate_payload(payload):

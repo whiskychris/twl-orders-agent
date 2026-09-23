@@ -1191,6 +1191,91 @@ class EmailLookupTests(unittest.TestCase):
         self.assertEqual(graphql.call_count, 2)
 
 
+def link_variant(**over):
+    base = {"id": "gid://shopify/ProductVariant/1", "title": "The Whisky List Shop", "sku": "", "stock": 10, "legacy_id": "111"}
+    return {**base, **over}
+
+
+def link_product(**over):
+    base = {
+        "id": "gid://shopify/Product/1", "title": "Arran 10 Year Old Single Malt Scotch Whisky",
+        "legacy_id": "1", "variants": [link_variant()],
+    }
+    return {**base, **over}
+
+
+class AdminProductUrlTests(unittest.TestCase):
+    def test_the_url_uses_the_store_handle_and_both_legacy_ids(self):
+        with mock.patch.object(entry, "get_shopify_config", return_value={"shop": "the-whisky-list.myshopify.com"}):
+            url = entry.admin_product_url("1", "111")
+        self.assertEqual(url, "https://admin.shopify.com/store/the-whisky-list/products/1/variants/111")
+
+
+class PickTwlVariantTests(unittest.TestCase):
+    def test_a_single_variant_product_uses_it_regardless_of_title(self):
+        chosen, note = entry.pick_twl_variant(link_product(variants=[link_variant(title="Default Title")]))
+        self.assertIsNone(note)
+        self.assertEqual(chosen["title"], "Default Title")
+
+    def test_the_twl_variant_is_picked_case_insensitively_among_several(self):
+        variants = [link_variant(id="gid://shopify/ProductVariant/2", title="Trade"), link_variant(title="the WHISKY list SHOP")]
+        chosen, note = entry.pick_twl_variant(link_product(variants=variants))
+        self.assertIsNone(note)
+        self.assertEqual(chosen["title"], "the WHISKY list SHOP")
+
+    def test_no_twl_variant_among_several_refuses_with_an_explanation(self):
+        variants = [link_variant(id="gid://shopify/ProductVariant/2", title="Trade"), link_variant(title="Retail")]
+        chosen, note = entry.pick_twl_variant(link_product(variants=variants))
+        self.assertIsNone(chosen)
+        self.assertIn("Trade", note)
+        self.assertIn("Retail", note)
+
+
+class FindProductLinkTests(unittest.TestCase):
+    """find_product_link's own job: picking the TWL variant and building the link on top of
+    find_for_order's product resolution, which is tested in test_product_pick.py."""
+
+    def setUp(self):
+        patcher = mock.patch.object(entry, "get_shopify_config", return_value={"shop": "the-whisky-list.myshopify.com"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_shopify_failure_becomes_a_clean_refusal(self):
+        with mock.patch.object(entry, "find_for_order", side_effect=ShopifyError("down")):
+            with self.assertRaises(ShopifyError):
+                entry.find_product_link("Arran 10")
+
+    def test_no_match_is_passed_through_unchanged(self):
+        decision = {"decision": "none", "unavailable": []}
+        with mock.patch.object(entry, "find_for_order", return_value=decision):
+            result = entry.find_product_link("Nonexistent Whisky")
+        self.assertEqual(result, decision)
+
+    def test_several_matches_are_passed_through_unchanged(self):
+        decision = {"decision": "ask", "options": [{"number": 1, "name": "x"}], "more_matches": 0, "unavailable": []}
+        with mock.patch.object(entry, "find_for_order", return_value=decision):
+            result = entry.find_product_link("Arran")
+        self.assertEqual(result, decision)
+
+    def test_one_match_returns_the_admin_link_to_the_twl_variant_not_the_checkout_one(self):
+        # The checkout "choice" order entry picked could be any variant; the link is always TWL's own.
+        decision = {"decision": "use", "product": link_product(), "choice": {"variant_id": "gid://shopify/ProductVariant/999"}, "unavailable": []}
+        with mock.patch.object(entry, "find_for_order", return_value=decision):
+            result = entry.find_product_link("Arran 10")
+        self.assertEqual(result["decision"], "use")
+        self.assertEqual(result["product"], "Arran 10 Year Old Single Malt Scotch Whisky")
+        self.assertEqual(result["url"], "https://admin.shopify.com/store/the-whisky-list/products/1/variants/111")
+
+    def test_ambiguous_variant_is_a_none_decision_with_a_note_never_a_guessed_link(self):
+        variants = [link_variant(id="gid://shopify/ProductVariant/2", title="Trade"), link_variant(title="Retail")]
+        decision = {"decision": "use", "product": link_product(variants=variants), "choice": {}, "unavailable": []}
+        with mock.patch.object(entry, "find_for_order", return_value=decision):
+            result = entry.find_product_link("Arran 10")
+        self.assertEqual(result["decision"], "none")
+        self.assertIn("Trade", result["note"])
+        self.assertNotIn("url", result)
+
+
 class ToolTests(unittest.TestCase):
     def names(self, capabilities):
         with mock.patch.object(authorization, "get_order_entry_channels", return_value=frozenset({"C0SALES"})):
@@ -1198,8 +1283,8 @@ class ToolTests(unittest.TestCase):
         return set(names)
 
     def test_order_entry_tools_exist_only_with_the_capability(self):
-        self.assertTrue({"find_customer", "find_variant", "prepare_draft_order"} <= self.names(("orders", "order_entry")))
-        for tool in ("find_customer", "find_variant", "prepare_draft_order"):
+        self.assertTrue({"find_customer", "find_variant", "product_link", "prepare_draft_order"} <= self.names(("orders", "order_entry")))
+        for tool in ("find_customer", "find_variant", "product_link", "prepare_draft_order"):
             self.assertNotIn(tool, self.names(("orders", "products", "inventory", "customers")))
 
     def test_there_is_no_tool_that_writes(self):

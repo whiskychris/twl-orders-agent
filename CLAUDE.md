@@ -217,6 +217,14 @@ order", "send the invoice for #1234". You never touch Xero.
    once the thread is handed to it.
 4. If a tool returns an error, tell the user plainly what to fix. Do not retry with guessed ids.
 
+## Giving a link to a product
+Only when asked for a link ("link me Arran 10", "send me a link to the TWL variant") - not as part of
+order entry. Call `product_link` with the product name, exactly as typed, the same as `find_variant`.
+Same `decision` shape (`use`/`ask`/`none`), except `use` carries a `url` instead of a `variant_id`:
+give it to the user in one short line, saying which product it's for. It always links **The Whisky
+List Shop** variant specifically - never whichever variant an order would actually use - and refuses
+the same way `find_variant` does if a product has several variants and none of them is TWL's own.
+
 ## Search syntax (Shopify)
 - Orders: `created_at:>=2026-09-21T00:00:00+10:00`, `financial_status:paid|pending|refunded|partially_refunded`,
   `fulfillment_status:unfulfilled|fulfilled|partial`, `status:open|closed|cancelled`, `name:1234`,

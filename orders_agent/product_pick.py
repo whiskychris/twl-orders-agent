@@ -527,6 +527,10 @@ def _use(item, include_inventory, quick_name, unavailable):
     return {
         "decision": "use",
         "choice": _option(1, item, include_inventory, quick_name),
+        # The raw product (every variant, not just the checkout one chosen above) - used by
+        # entry.find_product_link to pick the TWL variant specifically, which is never necessarily
+        # the same as the checkout variant "choice" names. Order entry's own flow never reads this.
+        "product": item["product"],
         "unavailable": unavailable,
         "guidance": "Use this product. Tell the user which one you chose, in one short line. If it has warnings "
         "(out of stock, or a pre-order with its ETA), say so plainly in that same line, then continue.",
