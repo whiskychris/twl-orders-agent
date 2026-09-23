@@ -393,14 +393,18 @@ def build_server(ctx, state=None):
 
         add(
             "check_price",
-            "Look up the RRP and LUC for a product - checking prices, not raising an order. RRP is the "
-            "price on The Whisky List's own variant. LUC is the trade catalog price with GST excluded "
-            "(divided by 1.1); a product not on any trade catalog has no LUC. These are selling prices, "
-            "never a cost or a margin. Returns a `decision`: 'use' means one product matched, with `rrp` "
-            "and `luc` (and `trade_catalog`, when there's more than one candidate, naming which one the "
-            "LUC came from); 'ask' means several products matched - list the numbered options and ask "
-            "which, never pick yourself; 'none' means nothing matched, or the product has more than one "
-            "variant and none of them is TWL's own.",
+            "Look up the RRP, LUC and Rewards Member price for a product - checking prices, not raising "
+            "an order. RRP is the price on The Whisky List's own variant. LUC is the trade catalog price "
+            "with GST excluded (divided by 1.1); a product not on any trade catalog has no LUC. The "
+            "Rewards Member price is RRP less 10% (TWL Brand or TWL Exclusive) or 20% (TWL IB / "
+            "Independent Bottler); a product with none of those tags has no Rewards Member price. These "
+            "are all selling prices, never a cost or a margin. Returns a `decision`: 'use' means one "
+            "product matched, with `rrp`, `luc` (and `trade_catalog`, when there's more than one "
+            "candidate, naming which one the LUC came from) and `rewards_member_price`, any of which may "
+            "be null when it doesn't apply - say so plainly, never guess a number; 'ask' means several "
+            "products matched - list the numbered options and ask which, never pick yourself; 'none' "
+            "means nothing matched, or the product has more than one variant and none of them is TWL's "
+            "own.",
             _schema(
                 {"query": {**STRING, "description": "The product as the user named it, for example 'Arran 10'."}},
                 required=["query"],

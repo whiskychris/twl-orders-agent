@@ -103,7 +103,7 @@ cask, a different pack size): the link is always to TWL's own stock record, neve
 actually use. The URL itself is `https://admin.shopify.com/store/{handle}/products/{id}/variants/{id}`, built
 from each side's `legacyResourceId` - the same form `admin_order_url` already uses for an order.
 
-## Checking a price (RRP and LUC)
+## Checking a price (RRP, LUC and Rewards Member)
 The `check_price` tool (`entry.check_price`) is for "checking prices for products we sell, primarily to trade
 customers" - a distinct capability from order entry, sharing only the product resolution (`find_for_order`) and
 the TWL variant rule (`pick_twl_variant`, same as `product_link` above). It needs no new Shopify scope -
@@ -129,3 +129,14 @@ the TWL variant rule (`pick_twl_variant`, same as `product_link` above). It need
   `resolve_sources` already uses for a missing collection or catalog. This deliberately does **not** flow
   through `resolve_sources`'s own hard failure (which order entry's ranking depends on): a price-list problem
   in Shopify must never break product search or order entry, only pricing itself, when it's actually asked for.
+- **Rewards Member price is a tag rule Chris gave directly, not read from Shopify.** Shopify's own automatic
+  discounts (`discountNodes`/`automaticDiscountNodes`) need a scope this app doesn't have (`read_discounts`),
+  and since eligibility is by customer tag ("Rewards Members"), the real discount is almost certainly
+  implemented as a Shopify Function whose actual logic isn't visible through the Admin API either way - checked
+  live before deciding this wasn't worth chasing further. `_rewards_member_discount_pct` (`entry.py`) instead
+  applies: 10% off a product tagged TWL Brand (tier 1) or TWL Exclusive (tier 3), 20% off one tagged TWL IB /
+  Independent Bottler (tier 2), reusing the exact tag lists `product_priority.json` already defines for
+  ranking - one source of truth, not a second hardcoded copy. Checked in tier order (1, 2, 3) for the rare
+  product tagged into more than one at once. No qualifying tag means no Rewards Member price - `null`, never
+  a guessed number. Confirmed live for Arran 10 (tagged TWL Brand) before shipping: RRP $109.00, 10% off is
+  exactly $98.10.

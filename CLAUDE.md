@@ -227,16 +227,19 @@ the same way `find_variant` does if a product has several variants and none of t
 
 ## Checking a price
 Call `check_price` with the product name, exactly as typed, the same as `find_variant`. Same
-`decision` shape (`use`/`ask`/`none`). On `use`:
+`decision` shape (`use`/`ask`/`none`). On `use`, three prices - give all that apply, each in one
+short line with a $ sign, and say plainly (never guess a number) when one of them is `null`:
 - **`rrp`**: the price on The Whisky List's own variant - the number a retail customer pays.
 - **`luc`**: the trade catalog price with GST excluded (divided by 1.1), or `null` if the product
-  isn't on any trade catalog - say so plainly, never guess a number. If more than one trade catalog
-  prices the product, `trade_catalog` names which one was used (Trade Core, then Trade IBs, then
-  Special Releases - the best-range precedence order entry already uses; a product's trade catalogs
-  don't always agree on price, so this is a rule, not a pick).
-Give both numbers in one short line each, with a $ sign. **These are selling prices - never call
-either one a cost or a margin**, and never mention them unless asked (unit costs and margins stay
-completely out of scope, per the hard rules above).
+  isn't on any trade catalog. If more than one trade catalog prices the product, `trade_catalog`
+  names which one was used (Trade Core, then Trade IBs, then Special Releases - the best-range
+  precedence order entry already uses; a product's trade catalogs don't always agree on price, so
+  this is a rule, not a pick).
+- **`rewards_member_price`**: RRP less the Rewards Member discount - 10% off a product tagged TWL
+  Brand or TWL Exclusive, 20% off one tagged TWL IB / Independent Bottler - or `null` if the product
+  carries none of those tags.
+**These are all selling prices - never call any of them a cost or a margin**, and never mention them
+unless asked (unit costs and margins stay completely out of scope, per the hard rules above).
 
 ## Search syntax (Shopify)
 - Orders: `created_at:>=2026-09-21T00:00:00+10:00`, `financial_status:paid|pending|refunded|partially_refunded`,

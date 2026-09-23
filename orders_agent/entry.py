@@ -427,16 +427,41 @@ def find_product_link(query):
     }
 
 
-LUC_PLACES = Decimal("0.01")
+PRICE_PLACES = Decimal("0.01")
+
+# The Rewards Member discount, by tag - Chris's own rule, given directly rather than read from
+# Shopify's automatic discounts: reading those needs a scope this app doesn't have (read_discounts),
+# and being eligible by customer tag, the real one is almost certainly an opaque Shopify Function
+# anyway - its logic wouldn't be visible through the API either way. Keyed by product_priority.json's
+# own tier number, so the SAME tag lists used for ranking are the only source of truth for this too -
+# tier 1 (TWL Brand) and tier 3 (TWL Exclusive) both mean 10%, tier 2 (TWL IB) means 20%. Checked in
+# tier order (1, 2, 3), the same precedence "best range wins" uses elsewhere, for the rare product
+# tagged into more than one of these at once. A product in none of them gets no Rewards Member price.
+REWARDS_MEMBER_DISCOUNT_PCT = {"1": Decimal("10"), "2": Decimal("20"), "3": Decimal("10")}
+
+
+def _rewards_member_discount_pct(tags, config):
+    lower_tags = {str(tag).lower() for tag in tags}
+    for tier, pct in REWARDS_MEMBER_DISCOUNT_PCT.items():
+        if any(str(tag).lower() in lower_tags for tag in config["tiers"][tier]["tags"]):
+            return pct
+    return None
 
 
 def check_price(query):
-    """RRP (the TWL variant's own listed price) and LUC (the trade catalog price, GST excluded) for
-    a product - checking prices, not creating an order. Uses the same product-picking knowledge as
-    order entry, so a short name works the same way here, and always prices the TWL variant, never
-    the checkout variant a draft order might actually use. Raises ShopifyError for a bad query or a
-    Shopify failure. Otherwise a decision dict - "use", "ask" or "none" - the model never guesses
-    which product was meant."""
+    """RRP, LUC and the Rewards Member price for a product - checking prices, not creating an order.
+    Uses the same product-picking knowledge as order entry, so a short name works the same way here,
+    and always prices the TWL variant, never the checkout variant a draft order might actually use.
+    Raises ShopifyError for a bad query or a Shopify failure. Otherwise a decision dict - "use", "ask"
+    or "none" - the model never guesses which product was meant.
+
+      rrp                the TWL variant's own listed price.
+      luc                the trade catalog price, GST excluded (see trade_catalog_price for how the
+                         catalog is chosen when a product is priced on more than one). None if the
+                         product isn't on any trade catalog.
+      rewards_member_price  RRP less the Rewards Member discount for this product's tag (see
+                         _rewards_member_discount_pct). None if no tag qualifies.
+    """
     decision = find_for_order(query)
     if decision["decision"] != "use":
         return decision  # ask / none, same shape order entry's own find_variant already gives
@@ -446,31 +471,41 @@ def check_price(query):
     if variant is None:
         return {"decision": "none", "note": note, "guidance": "Say plainly why this can't be priced."}
 
+    config = load_config()
+    rrp_raw = variant.get("price")
+    rrp = Decimal(str(rrp_raw)) if rrp_raw is not None else None
     result = {
         "decision": "use",
         "product": product["title"],
         "variant": variant["title"],
-        "rrp": variant.get("price"),
+        "rrp": str(rrp) if rrp is not None else None,
     }
-    trade_price, catalog_name = product_search.trade_catalog_price(load_config(), variant["legacy_id"])
+    lines = []
+
+    trade_price, catalog_name = product_search.trade_catalog_price(config, variant["legacy_id"])
     if trade_price is None:
         result["luc"] = None
-        result["guidance"] = (
-            "Give the user the RRP. Say plainly that this product has no trade catalog price, so "
-            "there is no LUC to give - don't guess one."
-        )
+        lines.append("this product has no trade catalog price, so there is no LUC to give - don't guess one")
     else:
         # LUC excludes GST: the trade catalog price already includes it, same as every other price
-        # in this store (see docs/product-selection.md, "Product links, not order entry" and
-        # docs/invoicing.md's own note on Shopify prices being GST-inclusive).
-        luc = (Decimal(str(trade_price)) / Decimal("1.1")).quantize(LUC_PLACES, rounding=ROUND_HALF_UP)
+        # in this store (see docs/invoicing.md's own note on Shopify prices being GST-inclusive).
+        luc = (Decimal(str(trade_price)) / Decimal("1.1")).quantize(PRICE_PLACES, rounding=ROUND_HALF_UP)
         result["luc"] = str(luc)
         result["trade_catalog"] = catalog_name
-        result["guidance"] = (
-            "Give the user the RRP and LUC, in one short line each, with a $ sign. If more than one "
-            "trade catalog could apply, say which one the LUC came from. These are selling prices - "
-            "never call them a cost or a margin."
-        )
+        lines.append("say which trade catalog the LUC came from if more than one could apply")
+
+    rewards_pct = _rewards_member_discount_pct(product["tags"], config)
+    if rrp is not None and rewards_pct is not None:
+        rewards_price = (rrp * (1 - rewards_pct / 100)).quantize(PRICE_PLACES, rounding=ROUND_HALF_UP)
+        result["rewards_member_price"] = str(rewards_price)
+    else:
+        result["rewards_member_price"] = None
+        lines.append("this product has no Rewards Member price, so don't give one")
+
+    result["guidance"] = (
+        "Give the user RRP, LUC and the Rewards Member price, each in one short line with a $ sign. "
+        + " ".join(lines) + ". These are selling prices - never call any of them a cost or a margin."
+    )
     return result
 
 
