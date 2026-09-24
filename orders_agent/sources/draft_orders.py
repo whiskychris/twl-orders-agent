@@ -517,6 +517,57 @@ def calculate(draft_input):
     }
 
 
+# --- the Rewards Member gift (gift.py) ------------------------------------------------------------
+
+GIFT_PRODUCT = """
+query GiftProduct($query: String!) {
+  products(first: 5, query: $query) {
+    nodes { id title status variants(first: 10) { nodes { id title inventoryQuantity } } }
+  }
+}
+"""
+
+# One customer at a time keeps the query cost low. Orders are only visible for the last 60 days; the
+# rewards agent's warehouse view covers anything older, and every gift draft carries a per-customer tag.
+CUSTOMER_GIFT_ORDERS = """
+query CustomerGiftOrders($id: ID!) {
+  customer(id: $id) {
+    id
+    orders(first: 25, sortKey: CREATED_AT, reverse: true) {
+      nodes { name cancelledAt lineItems(first: 10) { nodes { variant { id } } } }
+    }
+  }
+}
+"""
+
+
+def gift_variant(title):
+    """{"variant_id", "stock"} for the ACTIVE product with exactly this title: its The Whisky List Shop
+    variant, or its only variant. Anything else is an error, never a guess."""
+    escaped = str(title).replace("\\", "\\\\").replace('"', '\\"')
+    data = graphql(GIFT_PRODUCT, {"query": f'title:"{escaped}"'})
+    products = [node for node in _nodes(data.get("products")) if node.get("title") == title and node.get("status") == "ACTIVE"]
+    if len(products) != 1:
+        raise ShopifyError(f"Expected one active product titled '{title}' in Shopify, found {len(products)}.")
+    variants = _nodes(products[0].get("variants"))
+    own = [v for v in variants if str(v.get("title", "")).strip().lower() == "the whisky list shop"]
+    chosen = own[0] if len(own) == 1 else (variants[0] if len(variants) == 1 else None)
+    if chosen is None:
+        raise ShopifyError(f"'{title}' has no single The Whisky List Shop variant.")
+    return {"variant_id": chosen["id"], "stock": chosen.get("inventoryQuantity")}
+
+
+def order_with_variant(customer_id, variant_id):
+    """The name of a recent order (not cancelled) for this customer with this variant on it, or None."""
+    data = graphql(CUSTOMER_GIFT_ORDERS, {"id": customer_id})
+    for order in _nodes((data.get("customer") or {}).get("orders")):
+        if order.get("cancelledAt"):
+            continue
+        if any((line.get("variant") or {}).get("id") == variant_id for line in _nodes(order.get("lineItems"))):
+            return order.get("name")
+    return None
+
+
 # --- writes: called only from entry.execute, after an approved button press -----------------------
 
 

@@ -95,6 +95,13 @@ These stop a future session undoing decisions that were made on purpose.
 - **A new order can arrive from the rewards agent as a handoff** (`context.action == "prepare_draft_order"`
   in `main.py`). It only prepares the draft through `entry.prepare`, posted with this agent's own approval
   buttons; nothing is created until someone with `orders.approve` presses one.
+- **The Rewards Member gift writes outside `/v1/act`, like `mark_order_paid`** (`orders_agent/gift.py`, reached by a handoff
+  from rewards with `context.action == "create_gift_orders"`). Chris decided the day's gift list in #rewards
+  needs one approval, not two, so this creates the orders directly. It stays narrow on purpose: the approver
+  needs `rewards.approve` and `orders.approve` plus `order_entry` here; the handoff supplies only customer ids;
+  the product (exact title), quantity 1, 100% off, the note and the tags are fixed in code; Shopify must price
+  each at 0.00; and a per-customer tag (`rewards-gift-2026-<id>`) means nobody gets two. Don't widen it to other
+  products or to member orders, which still go through `prepare_draft_order` and `orders.approve`.
 - Permission changes can take up to five minutes to apply (per-instance cache).
 
 ## Style

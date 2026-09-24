@@ -17,7 +17,7 @@ import uuid
 
 from flask import Flask, jsonify, request
 
-from orders_agent import entry, shared
+from orders_agent import entry, gift, shared
 from orders_agent.authorization import (
     ALL_CAPABILITIES,
     AuthorizationError,
@@ -128,6 +128,20 @@ def v1_message():
         except AuthorizationUnavailable:
             app.logger.exception("permissions unavailable")
             return jsonify(error="permissions could not be checked, so the order was not marked paid"), 503
+        return jsonify(result)
+
+    # A handoff from the rewards agent, right after Chris or Oliver approved the day's Rewards Member gift
+    # list in #rewards: create one gift order per customer. This is the one approval (Chris's decision), so
+    # gift.create_gift_orders re-checks both approve roles, order_entry and the channel, and builds every
+    # order in code from the customer ids alone. See orders_agent/gift.py.
+    if context.get("action") == "create_gift_orders":
+        try:
+            result = gift.create_gift_orders(user, conversation, context, request_id)
+        except entry.ActRefused as exc:
+            return jsonify(text=str(exc))
+        except AuthorizationUnavailable:
+            app.logger.exception("permissions unavailable")
+            return jsonify(error="permissions could not be checked, so no gift orders were created"), 503
         return jsonify(result)
 
     # A self-handoff from _execute_order_edit, right after a successful edit: re-show the invoice
