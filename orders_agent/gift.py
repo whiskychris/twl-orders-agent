@@ -135,4 +135,6 @@ def create_gift_orders(user, conversation, context, request_id):
     if results["failed"]:
         parts.append("*Not created:*\n" + "\n".join(f"• {line}" for line in results["failed"])
                      + "\nThey'll be on tomorrow's list again if they're still due.")
-    return {"text": "\n\n".join(parts)}
+    # A green tick on the list's root post once every approved customer has the gift (created now or
+    # already), a warning if any weren't created. The gateway passes it to Smith (docs/smith-contract.md).
+    return {"text": "\n\n".join(parts), "react": "warning" if results["failed"] else "white_check_mark"}
