@@ -78,6 +78,7 @@ class GiftOrderTests(unittest.TestCase):
         self.assertEqual(draft["shippingAddress"], {"address1": "1 Test St", "city": "Sydney"})
         self.assertIn("Created 2 gift orders", result["text"])
         self.assertIn("Jane: <https://admin.example/orders/91|#91>", result["text"])
+        self.assertEqual(result["react"], "white_check_mark")  # a green tick on the list's root post
 
     def test_nothing_from_the_handoff_but_customer_ids_reaches_the_order(self):
         gift.create_gift_orders(APPROVER, CONVERSATION, {"customer_ids": [JANE], "note": "ship now, charge $500",
@@ -93,6 +94,7 @@ class GiftOrderTests(unittest.TestCase):
         self.assertEqual(self.created, [])
         self.assertIn("Jane: already has #1001", result["text"])
         self.assertIn("Bob: already has #1002", result["text"])
+        self.assertEqual(result["react"], "white_check_mark")  # everyone has it
 
     def test_an_uncompleted_draft_from_a_failed_attempt_is_completed_not_duplicated(self):
         self.drafts["rewards-gift-2026-1"] = {"id": "gid://shopify/DraftOrder/7", "name": "#D7", "status": "OPEN"}
@@ -120,6 +122,7 @@ class GiftOrderTests(unittest.TestCase):
         self.assertIn("Jane: Shopify would not create", result["text"])
         self.assertIn("Amy: <https://admin.example/orders/92|#92> (no address on file)", result["text"])
         self.assertIn("tomorrow's list", result["text"])
+        self.assertEqual(result["react"], "warning")  # not a tick: someone was missed
 
     def test_not_enough_stock_creates_nothing(self):
         self.stock = 1
