@@ -20,6 +20,8 @@ CACHE_SECONDS = 300
 USE_ROLE = "orders.use"  # the gateway's role: may this person use the orders assistant at all
 APPROVE_ROLE = "orders.approve"  # the gateway's role: may this person approve creating an order
 AUTHZ_SECRET = os.environ.get("ORDERS_AUTHZ_SECRET", "twl-orders-authz")  # who sees what
+# The Rewards Member gift (gift.py): the exact Shopify product title of the only product a gift order holds.
+GIFT_PRODUCT_TITLE = os.environ.get("GIFT_PRODUCT_TITLE", "2026 Rewards Member 20-Bottle Gift")
 
 _cache = {"value": None, "loaded_at": 0.0}
 
