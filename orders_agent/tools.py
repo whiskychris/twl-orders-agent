@@ -18,8 +18,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-from . import entry, shared
-from .authorization import ORDER_ENTRY, audit_tool
+from . import entry, fulfil, shared
+from .authorization import FULFIL, ORDER_ENTRY, audit_tool
 from .sources import draft_orders, shopify
 
 SERVER_NAME = "orders_data"
@@ -323,6 +323,79 @@ def build_server(ctx, state=None):
                 required=["lines"],
             ),
             prepare_draft_order,
+        )
+
+    # --- fulfil capability ----------------------------------------------------------------------
+    # Marking a paid order (or some of its items) fulfilled when it didn't go through the usual dispatch.
+    # prepare_fulfilment only reads and previews; the fulfilment is created in /v1/act after the button.
+
+    if ctx.has(FULFIL):
+
+        async def get_fulfillable_items(args):
+            return await call("get_fulfillable_items", FULFIL, fulfil.fulfillable_items, args.get("order", ""))
+
+        add(
+            "get_fulfillable_items",
+            "What's still waiting to be fulfilled on an order: one entry per item, with its line_item_id, "
+            "title, SKU, how many remain, where it is, and whether it's on hold. Also says whether the order is "
+            "paid (only paid orders can be marked fulfilled). Use it to match the items a person names ('the "
+            "Arran', '2 of the GlenAllachie') to line_item_ids before prepare_fulfilment.",
+            _schema({"order": {**STRING, "description": "Order number, with or without #."}}, required=["order"]),
+            get_fulfillable_items,
+        )
+
+        async def prepare_fulfilment(args):
+            audit_tool(ctx, "prepare_fulfilment", FULFIL, allowed=True)
+            try:
+                result = await asyncio.to_thread(
+                    fulfil.prepare, ctx, args.get("order", ""), args.get("items"),
+                    args.get("tracking_number"), args.get("tracking_company"),
+                )
+            except (entry.EntryError, shopify.ShopifyError) as exc:
+                log.warning("prepare_fulfilment refused for %s: %s", ctx.user_id, str(exc)[:500])
+                return _error(str(exc))
+            state.proposal = result["proposal"]
+            state.text = result["text"]
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "The fulfilment is ready and will be posted for approval with a button. Do "
+                        "not repeat the items. Say nothing more than one short line.",
+                    }
+                ]
+            }
+
+        add(
+            "prepare_fulfilment",
+            "Mark an existing, PAID order - or only some of its items - fulfilled, for an order that didn't go "
+            "through the usual dispatch (picked up, used internally, delivered another way). Nothing changes "
+            "until someone presses the button. Leave `items` out to fulfil everything still unfulfilled; "
+            "otherwise list each item with a line_item_id from get_fulfillable_items and, if not all of it, a "
+            "quantity. Tracking is optional: pass tracking_number (and tracking_company, as typed, for example "
+            "'DHL' or 'Australia Post') only if the person gave one - never invent one. The customer is never "
+            "emailed. Call again with the full corrected request if the person changes it.",
+            _schema(
+                {
+                    "order": {**STRING, "description": "Order number, with or without #."},
+                    "items": {
+                        "type": "array",
+                        "description": "Only when fulfilling some items. Omit to fulfil everything left.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "line_item_id": {**STRING, "description": "From get_fulfillable_items."},
+                                "quantity": {**INTEGER, "description": "How many. Omit for all remaining of this item."},
+                            },
+                            "required": ["line_item_id"],
+                        },
+                    },
+                    "tracking_number": {**STRING, "description": "Only if the person gave one."},
+                    "tracking_company": {**STRING, "description": "The carrier as the person typed it, if given."},
+                },
+                required=["order"],
+            ),
+            prepare_fulfilment,
         )
 
     server = create_sdk_mcp_server(name=SERVER_NAME, version=VERSION, tools=tools)

@@ -585,6 +585,11 @@ def _result(order, invoicing, prefix=""):
 def execute(user, conversation, choice, proposal, request_id):
     """Dispatches by proposal kind. Raises ActRefused (nothing changed, or the outcome needs a person
     to check Shopify). Any other exception means the outcome is unknown."""
+    if isinstance(proposal, dict) and proposal.get("kind") == "fulfilment":
+        # Its own authorization (the fulfil capability, not order_entry), so it's checked there.
+        from . import fulfil
+
+        return fulfil.execute(user, conversation, choice, proposal, request_id)
     ctx = _authorize(user, conversation, request_id)
     if not isinstance(proposal, dict):
         raise ActRefused("That isn't a draft, so I did nothing.")

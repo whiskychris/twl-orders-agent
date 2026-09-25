@@ -7,7 +7,7 @@ embedded = false
 api_version = "2026-07"
 
 [access_scopes]
-scopes = "read_orders,read_products,read_inventory,read_locations,read_customers,read_assigned_fulfillment_orders,read_merchant_managed_fulfillment_orders,read_third_party_fulfillment_orders,read_companies,read_draft_orders,write_draft_orders,read_publications,write_payment_terms,write_orders,write_order_edits,write_inventory"
+scopes = "read_orders,read_products,read_inventory,read_locations,read_customers,read_assigned_fulfillment_orders,read_merchant_managed_fulfillment_orders,read_third_party_fulfillment_orders,read_companies,read_draft_orders,write_draft_orders,read_publications,write_payment_terms,write_orders,write_order_edits,write_inventory,write_merchant_managed_fulfillment_orders"
 
 [auth]
 redirect_urls = [ "https://shopify.dev/apps/default-app-home/api/auth" ]

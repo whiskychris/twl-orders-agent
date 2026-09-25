@@ -21,6 +21,7 @@ never decides, and nothing the user types can change it.
 | `inventory` | `get_inventory`, `low_stock` | stock quantities in `search_products` |
 | `customers` | `search_customers` | customer, shipping address and order note fields on orders; free-text order search |
 | `order_entry` | `find_customer`, `find_variant`, `prepare_draft_order` | preparing a draft order. Allowed in a DM and in `order_entry_channels` only. Approval and creation are separate (`docs/order-entry.md`) |
+| `fulfil` | `get_fulfillable_items`, `prepare_fulfilment` | marking a paid order (or some items) fulfilled, for orders that didn't go through the usual dispatch. Allowed ONLY in `fulfil_channels` (#dispatch, #inventory), never a DM. Approved with the Mark Fulfilled button by someone with `orders.approve` and `fulfil` (`orders_agent/fulfil.py`) |
 
 Add a capability by adding it to `CAPABILITIES` in `orders_agent/authorization.py`, registering the tools
 under it in `tools.py`, and adding tests.
@@ -48,7 +49,9 @@ under it in `tools.py`, and adding tests.
 ## The permissions secret
 `twl-orders-authz`, readable only by the `twl-orders-agent` service account:
 ```json
-{"users": {"twl:chris-ross": {"name": "Chris Ross", "capabilities": ["orders", "products", "inventory", "customers"]}}}
+{"users": {"twl:chris-ross": {"name": "Chris Ross", "capabilities": ["orders", "products", "inventory", "customers", "fulfil"]}},
+ "order_entry_channels": ["C0C3LBK8R29"],
+ "fulfil_channels": ["C02201DJ3U5", "C02RFTCPUJW"]}
 ```
 The `name` here is what appears in prompts and logs. Keys must match `user_id` in `twl-gateway-config`.
 
