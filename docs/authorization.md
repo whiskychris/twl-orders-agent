@@ -21,6 +21,7 @@ never decides, and nothing the user types can change it.
 | `inventory` | `get_inventory`, `low_stock` | stock quantities in `search_products` |
 | `customers` | `search_customers` | customer, shipping address and order note fields on orders; free-text order search |
 | `order_entry` | `find_customer`, `find_variant`, `prepare_draft_order` | preparing a draft order. Allowed in a DM and in `order_entry_channels` only. Approval and creation are separate (`docs/order-entry.md`) |
+| `samples` | `find_variant`, `prepare_sample_order` | a $0 sample order on TWL's own sales@ or events@ account, created (and, with Create & Mark Fulfilled, fulfilled) after the button. Same channels as `fulfil`, never a DM (`orders_agent/samples.py`) |
 | `fulfil` | `get_fulfillable_items`, `prepare_fulfilment` | marking a paid order (or some items) fulfilled, for orders that didn't go through the usual dispatch. Allowed ONLY in `fulfil_channels` (#dispatch, #inventory), never a DM. Approved with the Mark Fulfilled button by someone with `orders.approve` and `fulfil` (`orders_agent/fulfil.py`) |
 
 Add a capability by adding it to `CAPABILITIES` in `orders_agent/authorization.py`, registering the tools

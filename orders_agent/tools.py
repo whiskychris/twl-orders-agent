@@ -18,8 +18,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-from . import entry, fulfil, shared
-from .authorization import FULFIL, ORDER_ENTRY, audit_tool
+from . import entry, fulfil, samples, shared
+from .authorization import FULFIL, ORDER_ENTRY, SAMPLES, audit_tool
 from .sources import draft_orders, shopify
 
 SERVER_NAME = "orders_data"
@@ -396,6 +396,69 @@ def build_server(ctx, state=None):
                 required=["order"],
             ),
             prepare_fulfilment,
+        )
+
+    # --- samples capability -----------------------------------------------------------------------------
+    # A $0 order on TWL's own sales or events account. The account and the 100% discount are fixed in
+    # samples.py; the model only names the account and the products.
+
+    if ctx.has(SAMPLES):
+        if not ctx.has(ORDER_ENTRY):
+            spec = shared.BY_NAME["find_variant"]
+
+            async def find_variant_for_samples(args):
+                return await call("find_variant", SAMPLES, spec.run, ctx, args)
+
+            add(spec.name, spec.description, spec.schema, find_variant_for_samples)
+
+        async def prepare_sample_order(args):
+            audit_tool(ctx, "prepare_sample_order", SAMPLES, allowed=True)
+            try:
+                result = await asyncio.to_thread(
+                    samples.prepare, ctx, args.get("account", ""), args.get("lines"), args.get("note"),
+                )
+            except (entry.EntryError, shopify.ShopifyError) as exc:
+                log.warning("prepare_sample_order refused for %s: %s", ctx.user_id, str(exc)[:500])
+                return _error(str(exc))
+            state.proposal = result["proposal"]
+            state.text = result["text"]
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "The sample order is priced and will be posted with buttons. Do not repeat the "
+                        "items. Say nothing more than one short line.",
+                    }
+                ]
+            }
+
+        add(
+            "prepare_sample_order",
+            "Raise a $0 sample order: bottles taken out of stock for samples, on TWL's own 'sales' (sales@) or "
+            "'events' (events@) account - nobody else. Every line is 100% off automatically; don't pass a "
+            "discount. Nothing is created until someone presses a button: 'Create & Mark Fulfilled' (creates it "
+            "and marks it all fulfilled) or 'Create Order Only'. If the person didn't say sales or events, ask. "
+            "Use variant_ids from find_variant. Call again with the FULL corrected line list for a change.",
+            _schema(
+                {
+                    "account": {"type": "string", "enum": sorted(samples.ACCOUNTS), "description": "sales or events."},
+                    "lines": {
+                        "type": "array",
+                        "description": "Every product on the sample order.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "variant_id": {**STRING, "description": "From find_variant."},
+                                "quantity": {**INTEGER, "description": "Whole units."},
+                            },
+                            "required": ["variant_id", "quantity"],
+                        },
+                    },
+                    "note": {**STRING, "description": "Optional short note (for example what the samples are for)."},
+                },
+                required=["account", "lines"],
+            ),
+            prepare_sample_order,
         )
 
     server = create_sdk_mcp_server(name=SERVER_NAME, version=VERSION, tools=tools)

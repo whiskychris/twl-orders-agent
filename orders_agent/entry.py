@@ -590,6 +590,11 @@ def execute(user, conversation, choice, proposal, request_id):
         from . import fulfil
 
         return fulfil.execute(user, conversation, choice, proposal, request_id)
+    if isinstance(proposal, dict) and proposal.get("kind") == "sample_order":
+        # Its own authorization too (the samples capability).
+        from . import samples
+
+        return samples.execute(user, conversation, choice, proposal, request_id)
     ctx = _authorize(user, conversation, request_id)
     if not isinstance(proposal, dict):
         raise ActRefused("That isn't a draft, so I did nothing.")

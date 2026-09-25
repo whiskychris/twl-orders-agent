@@ -30,6 +30,10 @@ Capabilities:
 
     {"users": {...}, "fulfil_channels": ["C0DISPATCH", "C0INVENTORY"]}
 
+    samples      raise a $0 sample order on one of TWL's own two accounts (sales@, events@) and, in the same
+                 press, mark it fulfilled (samples.py). Nothing else: no other customers, prices or invoicing.
+                 Same channels as fulfil (fulfil_channels), never a DM.
+
 Approving and creating the order is a separate step done in /v1/act (see entry.py), which checks the
 approver's role and this capability again.
 
@@ -53,7 +57,9 @@ from .config import AUTHZ_SECRET, CACHE_SECONDS, USE_ROLE, read_secret_json
 CAPABILITIES = ("orders", "products", "inventory", "customers")  # reading data
 ORDER_ENTRY = "order_entry"  # preparing (and, with approval, creating) a new order
 FULFIL = "fulfil"  # preparing (and, with approval, creating) a fulfilment for an existing paid order
-ALL_CAPABILITIES = CAPABILITIES + (ORDER_ENTRY, FULFIL)
+SAMPLES = "samples"  # preparing (and, with approval, creating and fulfilling) a $0 sample order
+ALL_CAPABILITIES = CAPABILITIES + (ORDER_ENTRY, FULFIL, SAMPLES)
+DISPATCH_CAPABILITIES = (FULFIL, SAMPLES)  # only in fulfil_channels (#dispatch, #inventory), never a DM
 
 log = logging.getLogger("orders_agent.authz")
 
@@ -111,6 +117,10 @@ class AuthContext:
                 " Marking orders fulfilled is not available in this conversation. It works in the dispatch"
                 " and inventory channels."
             )
+        if self.has(SAMPLES):
+            text += " This user can raise $0 sample orders on TWL's own sales or events account."
+        elif SAMPLES in self.withheld:
+            text += " Sample orders are not available in this conversation. They work in the dispatch and inventory channels."
         return text
 
 
@@ -249,16 +259,19 @@ def resolve_context(user, conversation, request_id):
         if ORDER_ENTRY in granted and not allowed_here:
             granted = granted - {ORDER_ENTRY}
             withheld = withheld + (ORDER_ENTRY,)
-    if FULFIL in granted:
+    dispatch = [c for c in DISPATCH_CAPABILITIES if c in granted]
+    if dispatch:
         # Only in the listed channels, never a DM, so the team sees every order marked fulfilled.
-        fulfil_here = visibility != "dm" and bool(channel_id) and channel_id in get_fulfil_channels()
-        if not fulfil_here:
-            granted = granted - {FULFIL}
-            withheld = withheld + (FULFIL,)
+        here = visibility != "dm" and bool(channel_id) and channel_id in get_fulfil_channels()
+        if not here:
+            granted = granted - set(dispatch)
+            withheld = withheld + tuple(dispatch)
     if not granted:
         audit("denied", request_id, user_id, source, visibility, reason="nothing_available_here")
-        if withheld == (FULFIL,):
-            raise AuthorizationError("Marking orders fulfilled works in the dispatch and inventory channels.")
+        if withheld and set(withheld) <= set(DISPATCH_CAPABILITIES):
+            raise AuthorizationError(
+                "Marking orders fulfilled and sample orders work in the dispatch and inventory channels."
+            )
         raise AuthorizationError(
             "That isn't available in a channel. Customer details and order entry work in a direct "
             "message with me, and in the sales channel."
