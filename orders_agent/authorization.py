@@ -23,6 +23,17 @@ Capabilities:
 
     {"users": {...}, "order_entry_channels": ["C0123SALES"]}
 
+    fulfil       mark a paid order (or some of its items) fulfilled, for orders that didn't go through the
+                 usual dispatch process (picked up, internal use, delivered another way), for approval.
+                 Available ONLY in the channels listed under "fulfil_channels" (#dispatch and #inventory),
+                 not in a DM, so the team sees every one:
+
+    {"users": {...}, "fulfil_channels": ["C0DISPATCH", "C0INVENTORY"]}
+
+    samples      raise a $0 sample order on one of TWL's own two accounts (sales@, events@) and, in the same
+                 press, mark it fulfilled (samples.py). Nothing else: no other customers, prices or invoicing.
+                 Same channels as fulfil (fulfil_channels), never a DM.
+
 Approving and creating the order is a separate step done in /v1/act (see entry.py), which checks the
 approver's role and this capability again.
 
@@ -45,11 +56,14 @@ from .config import AUTHZ_SECRET, CACHE_SECONDS, USE_ROLE, read_secret_json
 
 CAPABILITIES = ("orders", "products", "inventory", "customers")  # reading data
 ORDER_ENTRY = "order_entry"  # preparing (and, with approval, creating) a new order
-ALL_CAPABILITIES = CAPABILITIES + (ORDER_ENTRY,)
+FULFIL = "fulfil"  # preparing (and, with approval, creating) a fulfilment for an existing paid order
+SAMPLES = "samples"  # preparing (and, with approval, creating and fulfilling) a $0 sample order
+ALL_CAPABILITIES = CAPABILITIES + (ORDER_ENTRY, FULFIL, SAMPLES)
+DISPATCH_CAPABILITIES = (FULFIL, SAMPLES)  # only in fulfil_channels (#dispatch, #inventory), never a DM
 
 log = logging.getLogger("orders_agent.authz")
 
-_cache = {"value": None, "channels": None, "loaded_at": 0.0}
+_cache = {"value": None, "channels": None, "fulfil_channels": None, "loaded_at": 0.0}
 
 
 class AuthorizationError(Exception):
@@ -96,6 +110,17 @@ class AuthContext:
                 " Preparing new orders is not available in this conversation. It works in a direct"
                 " message and in the sales channel."
             )
+        if self.has(FULFIL):
+            text += " This user can mark paid orders (or some of their items) fulfilled."
+        elif FULFIL in self.withheld:
+            text += (
+                " Marking orders fulfilled is not available in this conversation. It works in the dispatch"
+                " and inventory channels."
+            )
+        if self.has(SAMPLES):
+            text += " This user can raise $0 sample orders on TWL's own sales or events account."
+        elif SAMPLES in self.withheld:
+            text += " Sample orders are not available in this conversation. They work in the dispatch and inventory channels."
         return text
 
 
@@ -112,13 +137,17 @@ def get_authz_config():
         users = config.get("users") if isinstance(config, dict) else None
         if not isinstance(users, dict):
             raise AuthorizationUnavailable(f"{AUTHZ_SECRET} has no 'users' map")
-        channels = config.get("order_entry_channels")
         _cache["value"] = users
-        _cache["channels"] = frozenset(
-            str(channel).strip().upper() for channel in channels if str(channel).strip()
-        ) if isinstance(channels, list) else frozenset()
+        _cache["channels"] = _channel_set(config.get("order_entry_channels"))
+        _cache["fulfil_channels"] = _channel_set(config.get("fulfil_channels"))
         _cache["loaded_at"] = now
     return _cache["value"]
+
+
+def _channel_set(channels):
+    if not isinstance(channels, list):
+        return frozenset()
+    return frozenset(str(channel).strip().upper() for channel in channels if str(channel).strip())
 
 
 def get_order_entry_channels():
@@ -126,6 +155,13 @@ def get_order_entry_channels():
     Comes from the same secret. An absent or malformed list means no channels."""
     get_authz_config()  # loads or refreshes the cache, and fails closed if unreadable
     return _cache["channels"] or frozenset()
+
+
+def get_fulfil_channels():
+    """The Slack channel ids where marking orders fulfilled is allowed (#dispatch, #inventory). Never a
+    DM. Comes from the same secret. An absent or malformed list means nowhere."""
+    get_authz_config()
+    return _cache["fulfil_channels"] or frozenset()
 
 
 def channel_of(conversation):
@@ -223,8 +259,19 @@ def resolve_context(user, conversation, request_id):
         if ORDER_ENTRY in granted and not allowed_here:
             granted = granted - {ORDER_ENTRY}
             withheld = withheld + (ORDER_ENTRY,)
+    dispatch = [c for c in DISPATCH_CAPABILITIES if c in granted]
+    if dispatch:
+        # Only in the listed channels, never a DM, so the team sees every order marked fulfilled.
+        here = visibility != "dm" and bool(channel_id) and channel_id in get_fulfil_channels()
+        if not here:
+            granted = granted - set(dispatch)
+            withheld = withheld + tuple(dispatch)
     if not granted:
         audit("denied", request_id, user_id, source, visibility, reason="nothing_available_here")
+        if withheld and set(withheld) <= set(DISPATCH_CAPABILITIES):
+            raise AuthorizationError(
+                "Marking orders fulfilled and sample orders work in the dispatch and inventory channels."
+            )
         raise AuthorizationError(
             "That isn't available in a channel. Customer details and order entry work in a direct "
             "message with me, and in the sales channel."

@@ -20,6 +20,7 @@ still offers them), install it on the store, and grant only these scopes:
 | `read_publications` | which catalogs (Trade Core, Trade IBs, Trade Special Releases) a product is published to, for product picking |
 | `write_draft_orders` | pricing a draft (nothing saved) and, after approval only, creating and completing it |
 | `write_order_edits` | editing an existing, unpaid order (`orderEditBegin`/`orderEditAddVariant`/`orderEditSetQuantity`/`orderEditCommit`) - a distinct scope from `write_orders`, found live: Shopify refused with "missing permission" until this was added |
+| `write_merchant_managed_fulfillment_orders` | marking a paid order (or some items) fulfilled with `fulfillmentCreate`, after the Mark Fulfilled button only (`orders_agent/fulfil.py`). All TWL locations are merchant-managed (no fulfilment-service apps), so the third-party write scope isn't needed. |
 | `write_inventory` | updating an on-hand quantity (`inventorySetQuantities`/`inventoryAdjustQuantities`) - read by `twl-inventory-agent`, a separate service sharing this same credential, not by this repo's own code. See that repo's `docs/inventory.md`. |
 
 Every write scope is used from exactly one deterministic code path, in `/v1/act`, after a person with
