@@ -131,6 +131,9 @@ These stop a future session undoing decisions that were made on purpose.
   `order_entry` here; the handoff supplies only customer ids, variant ids and quantities (at most 40 orders); prices
   are Shopify's own, with no discount; every order is unpaid with "Due on fulfilment" terms; and the tags
   (`allocation-<id>`, `allocation-<id>-<customer>`) make it safe to repeat. Don't add discounts or other products.
+  Once the bottles land, `send_allocation_invoices` (same roles, same one-approval handoff) sends Shopify's own invoice
+  email for each of the allocation's unpaid orders - Rewards Members are invoiced in Shopify, never Xero - and tags
+  each `allocation-<id>-invoiced` so nobody is emailed twice.
 - Permission changes can take up to five minutes to apply (per-instance cache).
 
 ## Style

@@ -158,6 +158,18 @@ def v1_message():
             return jsonify(error="permissions could not be checked, so no allocation orders were created"), 503
         return jsonify(result)
 
+    # The same allocation's approved invoice list, once its bottles have arrived: Shopify sends each unpaid
+    # order's invoice email. That approval is the only one. See allocation.send_allocation_invoices.
+    if context.get("action") == "send_allocation_invoices":
+        try:
+            result = allocation.send_allocation_invoices(user, conversation, context, request_id)
+        except entry.ActRefused as exc:
+            return jsonify(text=str(exc))
+        except AuthorizationUnavailable:
+            app.logger.exception("permissions unavailable")
+            return jsonify(error="permissions could not be checked, so no invoices were sent"), 503
+        return jsonify(result)
+
     # A self-handoff from _execute_order_edit, right after a successful edit: re-show the invoice
     # decision (Send Invoice / Edit Order / Cancel), re-priced with whatever just changed. Deterministic,
     # no model involved - the order name comes from the handoff's own structured context, not parsed
