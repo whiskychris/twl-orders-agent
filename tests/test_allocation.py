@@ -94,5 +94,62 @@ class AllocationOrderTests(unittest.TestCase):
         self.assertEqual(self.created, [])
 
 
+class AllocationInvoiceTests(unittest.TestCase):
+    TAG = "allocation-dd-nov-2026"
+
+    def setUp(self):
+        self.orders = {
+            "gid://shopify/Order/1": {"id": "gid://shopify/Order/1", "name": "#9001", "legacyResourceId": "1",
+                                      "tags": [self.TAG, f"{self.TAG}-1"], "cancelledAt": None,
+                                      "displayFinancialStatus": "PENDING"},
+            "gid://shopify/Order/2": {"id": "gid://shopify/Order/2", "name": "#9002", "legacyResourceId": "2",
+                                      "tags": [self.TAG, f"{self.TAG}-invoiced"], "cancelledAt": None,
+                                      "displayFinancialStatus": "PENDING"},
+            "gid://shopify/Order/3": {"id": "gid://shopify/Order/3", "name": "#9003", "legacyResourceId": "3",
+                                      "tags": ["something-else"], "cancelledAt": None, "displayFinancialStatus": "PENDING"},
+        }
+        self.sent, self.tagged = [], []
+
+        def fake_graphql(query, variables=None):
+            if "orderInvoiceSend" in query:
+                self.sent.append(variables["id"])
+                return {"orderInvoiceSend": {"userErrors": []}}
+            if "tagsAdd" in query:
+                self.tagged.append((variables["id"], variables["tags"]))
+                return {"tagsAdd": {"userErrors": []}}
+            return {"order": self.orders.get(variables["id"])}
+
+        patches = [
+            mock.patch.object(authorization, "get_authz_config", return_value=USERS),
+            mock.patch.object(authorization, "get_order_entry_channels", return_value=frozenset({REWARDS})),
+            mock.patch.object(allocation, "graphql", side_effect=fake_graphql),
+            mock.patch.object(allocation, "admin_order_url", side_effect=lambda legacy: f"https://admin.example/orders/{legacy}"),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def run_invoices(self, ids, user=APPROVER, tag=TAG):
+        return allocation.send_allocation_invoices(user, CONVERSATION, {
+            "action": "send_allocation_invoices", "allocation_id": "DD NOV 2026", "tag": tag, "order_ids": ids}, "r1")
+
+    def test_sends_shopify_invoices_once_and_only_for_this_allocation(self):
+        result = self.run_invoices(["gid://shopify/Order/1", "gid://shopify/Order/2", "gid://shopify/Order/3"])
+        self.assertEqual(self.sent, ["gid://shopify/Order/1"])
+        self.assertEqual(self.tagged, [("gid://shopify/Order/1", [f"{self.TAG}-invoiced"])])
+        self.assertIn("Sent 1 Shopify invoice", result["text"])
+        self.assertIn("was invoiced before", result["text"])
+        self.assertIn("isn't one of this allocation's orders", result["text"])
+        self.assertEqual(result["react"], "warning")
+
+    def test_needs_allocations_approve_and_a_well_formed_list(self):
+        with self.assertRaises(entry.ActRefused):
+            self.run_invoices(["gid://shopify/Order/1"], user={**APPROVER, "roles": ["orders.use", "orders.approve"]})
+        for bad in ([], ["#9001"]):
+            with self.assertRaises(entry.ActRefused):
+                self.run_invoices(bad)
+        self.assertEqual(self.sent, [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,6 @@
 """Rewards allocation orders: one UNPAID order per member who won bottles in an allocation ballot, at full
-price, with payment terms "Due on fulfilment" so it's invoiced when the bottles land.
+price, with payment terms "Due on fulfilment"; and, once the bottles land, Shopify's own invoice for each (see
+send_allocation_invoices at the end - Rewards Members are never invoiced through Xero).
 
 The only caller is the gateway's handoff relay, right after Chris or Ollie approved a ballot in #rewards
 (twl-allocations entry.py). That approval is the one approval, as for the Rewards gift, so this stays narrow
@@ -17,7 +18,7 @@ import re
 from .authorization import audit
 from .entry import ActRefused, _authorize, admin_order_url, build_input
 from .sources import draft_orders as shop
-from .sources.shopify import ShopifyError
+from .sources.shopify import ShopifyError, graphql
 
 ALLOCATIONS_APPROVE_ROLE = "allocations.approve"
 MAX_ORDERS = 40
@@ -119,4 +120,91 @@ def create_allocation_orders(user, conversation, context, request_id):
         parts.append("*Not created:*\n" + "\n".join(f"• {line}" for line in results["failed"])
                      + f"\nFix it, then `@Smith allocations: orders {allocation_id}` creates whatever's still missing.")
     return {"text": "\n\n".join(parts) or "Nothing to create.",
+            "react": "warning" if results["failed"] else "white_check_mark"}
+
+
+# --- invoicing, once the bottles land ----------------------------------------------------------------------
+# Rewards Members are invoiced by Shopify itself (the order's invoice email, with its payment link), never Xero.
+# The only caller is the handoff from an approved "Send invoices" list in #rewards (twl-allocations), the one
+# approval. Each order must carry the allocation's tag and still be unpaid; once its invoice is sent it gets
+# `<tag>-invoiced`, so a repeated approval never emails anyone twice.
+
+MAX_INVOICES = 100
+ORDER_GID = re.compile(r"^gid://shopify/Order/\d+$")
+
+ORDER_FOR_INVOICE = """
+query AllocationOrder($id: ID!) {
+  order(id: $id) { id name tags cancelledAt displayFinancialStatus legacyResourceId }
+}
+"""
+
+SEND_INVOICE = """
+mutation SendInvoice($id: ID!) {
+  orderInvoiceSend(id: $id) { order { id } userErrors { field message } }
+}
+"""
+
+ADD_TAG = """
+mutation Tag($id: ID!, $tags: [String!]!) {
+  tagsAdd(id: $id, tags: $tags) { userErrors { field message } }
+}
+"""
+
+
+def _invoice_one(order_id, tag):
+    """(outcome, text): sent, already or failed."""
+    try:
+        order = graphql(ORDER_FOR_INVOICE, {"id": order_id}).get("order")
+        if not order:
+            return "failed", f"order {order_id.rsplit('/', 1)[-1]} isn't in Shopify"
+        link = _link(order)
+        tags = {str(t) for t in order.get("tags") or []}
+        if tag not in tags:
+            return "failed", f"{link} isn't one of this allocation's orders"
+        if order.get("cancelledAt"):
+            return "failed", f"{link} is cancelled"
+        if f"{tag}-invoiced" in tags:
+            return "already", f"{link} was invoiced before"
+        if order.get("displayFinancialStatus") in ("PAID", "REFUNDED", "VOIDED"):
+            return "already", f"{link} is already {order['displayFinancialStatus'].lower()}"
+        errors = (graphql(SEND_INVOICE, {"id": order_id}).get("orderInvoiceSend") or {}).get("userErrors") or []
+        if errors:
+            return "failed", f"{link}: " + "; ".join(e.get("message", "") for e in errors)[:200]
+        graphql(ADD_TAG, {"id": order_id, "tags": [f"{tag}-invoiced"]})
+        return "sent", link
+    except ShopifyError as exc:
+        return "failed", str(exc)[:200]
+
+
+def send_allocation_invoices(user, conversation, context, request_id):
+    """Returns {"text", "react"}. Raises ActRefused (nothing sent) before the first invoice."""
+    roles = [str(role) for role in ((user or {}).get("roles") or [])]
+    if ALLOCATIONS_APPROVE_ROLE not in roles:
+        raise ActRefused("Allocation invoices come only from an approved Rewards allocation.")
+    ctx = _authorize(user, conversation, request_id)
+    context = context or {}
+    tag = str(context.get("tag") or "")
+    allocation_id = " ".join(str(context.get("allocation_id") or "").split())[:60]
+    ids = context.get("order_ids")
+    if not TAG.match(tag) or not allocation_id or not isinstance(ids, list) or not 1 <= len(ids) <= MAX_INVOICES \
+            or not all(ORDER_GID.match(str(i or "")) for i in ids):
+        raise ActRefused("That list of allocation orders is malformed, so no invoices were sent.")
+
+    results = {"sent": [], "already": [], "failed": []}
+    for order_id in dict.fromkeys(ids):
+        outcome, detail = _invoice_one(order_id, tag)
+        results[outcome].append(detail)
+    audit("order_entry", request_id, ctx.user_id, ctx.source, ctx.visibility, action="allocation_invoices",
+          sent=len(results["sent"]), already=len(results["already"]), failed=len(results["failed"]))
+    parts = []
+    if results["sent"]:
+        count = len(results["sent"])
+        parts.append(f"*Sent {count} Shopify invoice{'s' if count != 1 else ''}* for {allocation_id}:\n"
+                     + "\n".join(f"• {line}" for line in results["sent"]))
+    if results["already"]:
+        parts.append("*Skipped:*\n" + "\n".join(f"• {line}" for line in results["already"]))
+    if results["failed"]:
+        parts.append("*Not sent:*\n" + "\n".join(f"• {line}" for line in results["failed"])
+                     + f"\n`@Smith allocations: invoice {allocation_id}` lists whatever is still unpaid.")
+    return {"text": "\n\n".join(parts) or "Nothing to send.",
             "react": "warning" if results["failed"] else "white_check_mark"}
