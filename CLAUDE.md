@@ -125,6 +125,12 @@ These stop a future session undoing decisions that were made on purpose.
   the product (exact title), quantity 1, 100% off, the note and the tags are fixed in code; Shopify must price
   each at 0.00; and a per-customer tag (`rewards-gift-2026-<id>`) means nobody gets two. Don't widen it to other
   products or to member orders, which still go through `prepare_draft_order` and `orders.approve`.
+- **Rewards allocation orders write outside `/v1/act` the same way** (`orders_agent/allocation.py`, a handoff from
+  twl-allocations with `context.action == "create_allocation_orders"`, right after Chris or Ollie approve a ballot
+  in #rewards - Chris's decision, 2026-09-26). The approver needs `allocations.approve` and `orders.approve` plus
+  `order_entry` here; the handoff supplies only customer ids, variant ids and quantities (at most 40 orders); prices
+  are Shopify's own, with no discount; every order is unpaid with "Due on fulfilment" terms; and the tags
+  (`allocation-<id>`, `allocation-<id>-<customer>`) make it safe to repeat. Don't add discounts or other products.
 - Permission changes can take up to five minutes to apply (per-instance cache).
 
 ## Style

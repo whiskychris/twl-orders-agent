@@ -17,7 +17,7 @@ import uuid
 
 from flask import Flask, jsonify, request
 
-from orders_agent import entry, gift, shared
+from orders_agent import allocation, entry, gift, shared
 from orders_agent.authorization import (
     ALL_CAPABILITIES,
     AuthorizationError,
@@ -142,6 +142,20 @@ def v1_message():
         except AuthorizationUnavailable:
             app.logger.exception("permissions unavailable")
             return jsonify(error="permissions could not be checked, so no gift orders were created"), 503
+        return jsonify(result)
+
+    # A handoff from the allocations service, right after Chris or Ollie approved a Rewards allocation ballot
+    # in #rewards: one unpaid order per winner. Like the gift, that approval is the only one, so
+    # allocation.create_allocation_orders re-checks both approve roles, order_entry and the channel, and builds
+    # every order in code (Shopify's prices, fixed tags and note). See orders_agent/allocation.py.
+    if context.get("action") == "create_allocation_orders":
+        try:
+            result = allocation.create_allocation_orders(user, conversation, context, request_id)
+        except entry.ActRefused as exc:
+            return jsonify(text=str(exc))
+        except AuthorizationUnavailable:
+            app.logger.exception("permissions unavailable")
+            return jsonify(error="permissions could not be checked, so no allocation orders were created"), 503
         return jsonify(result)
 
     # A self-handoff from _execute_order_edit, right after a successful edit: re-show the invoice
